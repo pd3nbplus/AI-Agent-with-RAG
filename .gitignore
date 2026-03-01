@@ -1,6 +1,7 @@
 .venv/
 .vscode/
 __pycache__/
+【Agent开发】*.md
 *.pyc
 .env
 *.pyd
