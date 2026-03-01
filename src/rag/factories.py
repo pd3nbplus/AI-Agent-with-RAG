@@ -1,5 +1,5 @@
 # src/rag/factories.py
-from src.rag.chunkers import RecursiveChunker, FixedChunker, BaseChunker
+from src.rag.chunkers import RecursiveChunker, FixedChunker, BaseChunker, ParentChildChunker
 from src.rag.reranker import Reranker # 引入之前的重排类
 from src.core.config import settings
 import logging
@@ -24,6 +24,14 @@ class ChunkerFactory:
             return FixedChunker(
                 chunk_size=settings.rag_offline.chunk_size,
                 chunk_overlap=settings.rag_offline.chunk_overlap
+            )
+        elif strategy == "parent_child":
+            return ParentChildChunker(
+                parent_size=settings.rag_offline.chunk_size,
+                child_size=settings.rag_offline.child_chunk_size, 
+                overlap=settings.rag_offline.chunk_overlap,
+                child_overlap=settings.rag_offline.child_chunk_overlap,
+                separators=separators
             )
         else:
             logger.warning(f"⚠️ 未知分块策略 '{strategy}'，降级使用 recursive")

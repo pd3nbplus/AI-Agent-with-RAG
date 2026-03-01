@@ -4,7 +4,7 @@ from src.core.es_client import es_client_instance
 from src.core.config import settings
 from typing import List, Optional
 import logging
-
+import os
 logger = logging.getLogger(__name__)
 
 class ESSummariesRetriever(BaseRetrievalStrategy):
@@ -14,8 +14,10 @@ class ESSummariesRetriever(BaseRetrievalStrategy):
     def __init__(self):
         self.es = es_client_instance
         self.index_name = settings.db.es_index_summaries
+        # 从配置读取是否启用父子上下文
+        self.use_parent_context = settings.rag_offline.chunk_strategy == "parent_child"
         if self.es.is_available():
-            logger.info(f"🔌 [Plugin] ES 检索插件{self.index_name}已就绪")
+            logger.info(f"🔌 [Plugin] ES 检索插件{self.index_name}已就绪 检索模式: ({'查子反父' if self.use_parent_context else 'normal'})")
         else:
             logger.warning("🔌 [Plugin] ES 不可用，此插件将自动跳过")
 
@@ -26,14 +28,27 @@ class ESSummariesRetriever(BaseRetrievalStrategy):
         # 调用封装好的搜索方法
         # 注意：ES 原生不支持复杂的 JSON 过滤表达式 (如 Milvus 语法)，这里暂不实现 filter_expr
         # 如果需要，可以在 ES 查询中添加 term 过滤
-        raw_hits = self.es.search_summaries(query, top_k=top_k)
+        hits = self.es.search_summaries(query, top_k=top_k)
         
         results = []
-        for hit in raw_hits:
+        for hit in hits:
+            meta = hit['metadata'] or {}
+            original_text = hit['text']
+            
+            final_text = original_text
+            # source_tag = "es_summaries"
+            source_tag = os.path.splitext(os.path.basename(__file__))[0]
+            # 👇 核心逻辑：查子返父
+            if self.use_parent_context and meta.get("parent_text"):
+                final_text = meta["parent_text"]
+                source_tag = source_tag + "_parent"
+                # 可选：在 metadata 中记录原始子块文本，方便调试
+                meta['_matched_child_text'] = original_text
+
             results.append(SearchResult(
-                text=hit['text'],
+                text=final_text,
                 score=hit['score'],
-                metadata=hit['metadata'],
-                source_field="es_questions"
+                metadata=meta,
+                source_field=source_tag
             ))
         return results

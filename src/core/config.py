@@ -69,15 +69,19 @@ class EmbeddingSettings(BaseSettings):
 
 class RagOfflineSettings(BaseSettings):
     """RAG 检索前 (Offline) 配置：分块与入库"""
-    # 分块策略选择: 'recursive' (递归), 'fixed' (固定长度), 'sentence' (按句子)
-    chunk_strategy: str = "recursive" # recursive, fixed, sentence
+    # 分块策略选择: 'recursive' (递归), 'fixed' (固定长度), 'parent_child' (父子)
+    chunk_strategy: str = "recursive" # recursive, fixed, parent_child
     # 分块参数
     chunk_size: int = 500
     chunk_overlap: int = 50
-    # 分隔符配置 (仅 recursive 策略有效)
+    # 分隔符配置 
     # 可以使用逗号分隔多个字符，例如 "\n\n,\n,。"
     chunk_separators: str = "\n\n,\n,。,!,?， ,"
     
+    # 父子分块特有参数
+    # 子块大小和重叠
+    child_chunk_size: int = 50
+    child_chunk_overlap: int = 10
     @property
     def separators_list(self) -> List[str]:
         return self.chunk_separators.split(',') if self.chunk_separators else ["\n\n"]

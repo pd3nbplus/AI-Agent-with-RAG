@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 class DataIngestionPipeline:
     def __init__(self):
         self.milvus = get_milvus_client()
+        self.es = es_client_instance
         # 1. 初始化 LLM (用于元数据增强)
         self.llm_enhancer = ChatOpenAI(
             model=settings.llm.model_name,
@@ -91,35 +92,38 @@ class DataIngestionPipeline:
 
     def process_file(self, file_path: str, category: str = "general"):
         """处理单个文件：加载 -> 分块 -> 增强 -> 入库"""
-        docs = self.load_document(file_path)
+        # 1. 加载文档
+        docs = self.load_document(file_path) 
         if not docs:
             return
 
         all_chunks = []
         
-        # 分块
+        # 2. 分块 (统一调用 split_documents，无需关心内部是简单还是父子)
+        # 输入：List[Document], 输出：List[Document]
         for doc in docs:
-            # doc.page_content 是文本，doc.metadata 包含页码等信息
             splits = self.text_splitter.split_documents([doc])
             all_chunks.extend(splits)
         
         logger.info(f"✂️ 分块完成，共生成 {len(all_chunks)} 个 chunks")
 
-        # 入库
+        # 3. 入库
         success_count = 0
         for i, chunk in enumerate(all_chunks):
             text = chunk.page_content
             
-            # 跳过过短的块（可能是噪点）
-            if len(text.strip()) < 20:
+            # 跳过过短的块
+            if len(text.strip()) < 5:
                 continue
 
-            # 元数据增强 (可选：为了速度，生产环境可异步或批量处理)
+            # 元数据增强(可选：为了速度，生产环境可异步或批量处理)
             enhanced_meta = self.enhance_metadata(text, chunk.metadata.get("source", ""))
             summary_str = enhanced_meta.get("summary", "")
             questions_str = enhanced_meta.get("questions", "")
 
+            # 合并元数据：保留分块器产生的 metadata (如 parent_id, parent_text)
             final_metadata = {
+                **chunk.metadata,  # 👈 关键：保留 parent_id 和 parent_text
                 "source": os.path.basename(file_path),
                 "page": chunk.metadata.get("page", 0),
                 "category": category,
@@ -127,33 +131,33 @@ class DataIngestionPipeline:
                 "questions": questions_str
             }
             
+            # 生成唯一 ID
             doc_id = f"{os.path.basename(file_path)}_{i}_{uuid.uuid4().hex[:6]}"
             
-            # 2. 存入 Milvus (向量库)
+            # A. 存入 Milvus (向量化的是 chunk.page_content 即小子块)
             try:
                 self.milvus.insert_data(
                     id=doc_id,
                     text=text,
-                    metadata=final_metadata
+                    metadata=final_metadata # metadata 里现在包含了 parent_text
                 )
                 success_count += 1
             except Exception as e:
                 logger.error(f"❌ Milvus 插入失败：{e}")
 
-            # 3. 存入 Elasticsearch (关键词库) - 双管齐下
-            if es_client_instance.is_available():
-                # A. 写入问题索引 (包含 summary)
+            # B. 存入 Elasticsearch (关键词库) - 双管齐下
+            if self.es.is_available():
                 if questions_str:
-                    es_client_instance.indexing_question(
+                    self.es.indexing_question(
                         doc_id=doc_id,
                         questions=questions_str,
+                        summary=summary_str,
                         text=text,
                         metadata=final_metadata
                     )
                 
-                # B. 写入摘要索引 (新增！)
                 if summary_str:
-                    es_client_instance.indexing_summary(
+                    self.es.indexing_summary(
                         doc_id=doc_id,
                         summary=summary_str,
                         text=text,
