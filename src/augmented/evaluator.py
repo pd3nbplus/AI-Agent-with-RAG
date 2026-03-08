@@ -1,4 +1,4 @@
-﻿"""
+"""
 RAG evaluator (sync).
 - Read generated eval samples from PostgreSQL.
 - Reuse existing retrieval pipeline to produce answer + contexts.
@@ -27,6 +27,7 @@ from src.core.embedding_client import get_ragas_shared_embedding
 from src.core.models import RagEvalResult, RagEvalSample
 from src.core.postgres_client import get_postgres_client
 from src.rag.pipeline import RetrievalPipeline
+from src.schema.augmented_schema import EvalInputSample, EvalResultSample
 from src.utils.xml_parser import remove_think_and_n
 from sqlalchemy import func
 
@@ -104,11 +105,12 @@ class RAGEvaluator:
 
     def _ensure_eval_tables(self) -> None:
         """启动时检查评估结果表结构，避免运行中才暴露建表问题。"""
-        RagEvalResult.__table__.create(bind=self.pg_client.engine, checkfirst=True)
+        # 数据库结构迁移统一由 sql/ 下的脚本维护。
+        return
 
     def load_samples_from_postgres(
         self, limit: int = 100, batch_ids: Optional[List[int]] = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[EvalInputSample]:
         """按批次加载评测样本；batch_ids 为空时回退为全量随机抽样。"""
         with self.pg_client.get_session() as session:
             q = session.query(RagEvalSample)
@@ -116,16 +118,16 @@ class RAGEvaluator:
                 q = q.filter(RagEvalSample.batch_id.in_(batch_ids))
             rows: List[RagEvalSample] = q.order_by(func.random()).limit(limit).all()
 
-        samples: List[Dict[str, Any]] = []
+        samples: List[EvalInputSample] = []
         for r in rows:
             samples.append(
-                {
-                    "id": r.id,
-                    "batch_id": int(r.batch_id or 1),
-                    "query": r.query,
-                    "ground_truth_answer": r.ground_truth_answer,
-                    "ground_truth_context": r.ground_truth_context or [],
-                }
+                EvalInputSample(
+                    sample_id=r.id,
+                    sample_batch_id=int(r.batch_id or 1),
+                    question=r.question,
+                    ground_truth=r.ground_truth,
+                    ground_truth_contexts=r.ground_truth_contexts or [],
+                )
             )
         logger.info(
             "Loaded %s eval samples from PostgreSQL (batch_ids=%s)",
@@ -134,19 +136,19 @@ class RAGEvaluator:
         )
         return samples
 
-    def run_pipeline_for_query(self, query: str) -> Dict[str, Any]:
+    def run_pipeline_for_question(self, question: str) -> Dict[str, Any]:
         """Retrieve contexts then generate answer."""
-        results = self._run_async(self.pipeline.run(query=query, top_k=self.top_k))
+        results = self._run_async(self.pipeline.run(query=question, top_k=self.top_k))
         contexts = [r.text for r in results] if results else []
 
         chain = self.answer_prompt | self.answer_llm
-        resp = chain.invoke({"question": query, "contexts": "\n\n".join(contexts)})
+        resp = chain.invoke({"question": question, "contexts": "\n\n".join(contexts)})
         # 清理部分模型返回的 <think> 推理片段，避免污染评估与报告展示。
         answer = remove_think_and_n(getattr(resp, "content", "") or "")
 
         return {"contexts": contexts, "answer": answer}
 
-    def evaluate_dataset(self, test_samples: List[Dict[str, Any]]) -> pd.DataFrame:
+    def evaluate_dataset(self, test_samples: List[EvalInputSample]) -> pd.DataFrame:
         """Run pipeline and compute RAGAS metrics."""
         if not test_samples:
             return pd.DataFrame()
@@ -156,23 +158,24 @@ class RAGEvaluator:
 
         # 关键节点3：逐条样本执行“检索+回答”，并转换到 ragas 所需字段。
         for s in test_samples:
-            out = self.run_pipeline_for_query(s["query"])
+            out = self.run_pipeline_for_question(s.question)
             rows_for_ragas.append(
                 {
                     # 样本追踪字段：用于写回评估结果表与诊断表。
-                    "sample_id": s["id"],
-                    "sample_batch_id": int(s.get("batch_id", 1)),
+                    "sample_id": s.sample_id,
+                    "sample_batch_id": s.sample_batch_id,
                     # New ragas schema keys.
-                    "user_input": s["query"],
+                    "user_input": s.question,
                     "response": out["answer"],
                     "retrieved_contexts": out["contexts"],
-                    "reference": s["ground_truth_answer"],
-                    "reference_contexts": s.get("ground_truth_context", []),
+                    "reference": s.ground_truth,
+                    "reference_contexts": s.ground_truth_contexts,
                     # Keep compatibility aliases for older tooling/exports.
-                    "question": s["query"],
+                    "question": s.question,
                     "answer": out["answer"],
                     "contexts": out["contexts"],
-                    "ground_truth": s["ground_truth_answer"],
+                    "ground_truth": s.ground_truth,
+                    "ground_truth_contexts": s.ground_truth_contexts,
                 }
             )
 
@@ -201,23 +204,23 @@ class RAGEvaluator:
 
         rows: List[Dict[str, Any]] = []
         for _, row in df_results.iterrows():
+            sample = EvalResultSample(
+                sample_id=str(row["sample_id"]),
+                sample_batch_id=int(row.get("sample_batch_id", 1) or 1),
+                question=str(row["question"]),
+                answer=str(row["answer"]),
+                contexts=row.get("contexts", []) or [],
+                ground_truth=str(row["ground_truth"]),
+                ground_truth_contexts=row.get("ground_truth_contexts", []) or [],
+                faithfulness=float(row.get("faithfulness", 0.0) or 0.0),
+                answer_relevancy=float(row.get("answer_relevancy", 0.0) or 0.0),
+                context_precision=float(row.get("context_precision", 0.0) or 0.0),
+                context_recall=float(row.get("context_recall", 0.0) or 0.0),
+            )
             rows.append(
                 {
                     "eval_run_id": eval_run_id,
-                    "sample_id": str(row.get("sample_id", "")),
-                    "sample_batch_id": int(row.get("sample_batch_id", 1) or 1),
-                    "question": str(row.get("question", row.get("user_input", ""))),
-                    "answer": str(row.get("answer", row.get("response", ""))),
-                    "contexts": row.get("contexts", row.get("retrieved_contexts", [])) or [],
-                    "ground_truth": str(row.get("ground_truth", row.get("reference", ""))),
-                    "ground_truth_contexts": row.get(
-                        "ground_truth_contexts", row.get("reference_contexts", [])
-                    )
-                    or [],
-                    "faithfulness": float(row.get("faithfulness", 0.0) or 0.0),
-                    "answer_relevancy": float(row.get("answer_relevancy", 0.0) or 0.0),
-                    "context_precision": float(row.get("context_precision", 0.0) or 0.0),
-                    "context_recall": float(row.get("context_recall", 0.0) or 0.0),
+                    **sample.model_dump(),
                     "created_at": datetime.now(UTC),
                 }
             )
@@ -241,3 +244,6 @@ if __name__ == "__main__":
     evaluator = RAGEvaluator(top_k=3)
     df, _ = evaluator.evaluate_from_postgres(limit=10)
     print(df.head())
+
+
+

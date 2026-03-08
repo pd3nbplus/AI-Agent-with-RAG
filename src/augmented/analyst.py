@@ -1,4 +1,4 @@
-﻿"""RAG 评估结果分析器。通过 LLMRouter 进行诊断生成。"""
+"""RAG 评估结果分析器。通过 LLMRouter 进行诊断生成。"""
 # src/augmented/analyst.py
 from __future__ import annotations
 
@@ -12,12 +12,13 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 from langchain_core.prompts import ChatPromptTemplate
+from sqlalchemy import desc
 
 from src.augmented.config import GeneratorConfig, build_default_config
+from src.augmented.llm_router import LLMRouter
 from src.core.models import RagEvalDiagnosis, RagEvalResult
 from src.core.postgres_client import get_postgres_client
-from src.augmented.llm_router import LLMRouter
-from sqlalchemy import desc
+from src.schema.augmented_schema import EvalResultSample
 
 logger = logging.getLogger(__name__)
 
@@ -72,27 +73,6 @@ class RAGAnalyst:
             return asyncio.run(coro)
 
     @staticmethod
-    def _pick(row: pd.Series, *keys: str, default=None):
-        for k in keys:
-            if k not in row:
-                continue
-
-            v = row[k]
-            # 复杂结构（list/dict 等）直接视为有效值，避免 pd.notna 返回数组导致歧义。
-            if isinstance(v, (list, tuple, dict, set)):
-                return v
-            if v is None:
-                continue
-            try:
-                if pd.isna(v):
-                    continue
-            except Exception:
-                # 对不支持 isna 判断的对象，按有效值处理。
-                pass
-            return v
-        return default
-
-    @staticmethod
     def _to_text_list(value) -> List[str]:
         """将上下文字段统一为字符串列表，兼容 CSV 中的字符串化 list。"""
         if value is None:
@@ -121,7 +101,7 @@ class RAGAnalyst:
         s = re.sub(r"<think>.*?</think>", "", s, flags=re.S | re.I)
         s = s.strip().lower()
         s = re.sub(r"\s+", "", s)
-        s = re.sub(r"[，。！？；：、,.!?;:\"'`~\-_\(\)\[\]{}<>]", "", s)
+        s = re.sub(r"[，。！？；：、,.!?;:\"'`~\\-_\\(\\)\\[\\]{}<>]", "", s)
         return s
 
     def _is_unanswerable_text(self, text: str) -> bool:
@@ -147,30 +127,9 @@ class RAGAnalyst:
         - 模型回答也明确不可回答
         这类样本不应作为坏案例。
         """
-        gt = self._pick(row, "ground_truth", "reference", "ground_truth_answer", default="")
-        ans = self._pick(row, "answer", "response", default="")
+        gt = str(row.get("ground_truth", ""))
+        ans = str(row.get("answer", ""))
         return self._is_unanswerable_text(gt) and self._is_unanswerable_text(ans)
-
-    def _normalize_case(self, row: pd.Series) -> Dict:
-        """兼容 evaluator 输出的多种字段名。"""
-        contexts = self._to_text_list(self._pick(row, "contexts", "retrieved_contexts", default=[]))
-        gt_contexts = self._to_text_list(
-            self._pick(row, "ground_truth_contexts", "reference_contexts", default=[])
-        )
-
-        return {
-            "sample_id": self._pick(row, "sample_id", "id", default=""),
-            "sample_batch_id": int(self._pick(row, "sample_batch_id", "batch_id", default=1) or 1),
-            "question": self._pick(row, "question", "user_input", default=""),
-            "answer": self._pick(row, "answer", "response", default=""),
-            "contexts": contexts,
-            "ground_truth": self._pick(row, "ground_truth", "reference", default=""),
-            "ground_truth_contexts": gt_contexts,
-            "faithfulness": float(self._pick(row, "faithfulness", default=0.0) or 0.0),
-            "answer_relevancy": float(self._pick(row, "answer_relevancy", default=0.0) or 0.0),
-            "context_precision": float(self._pick(row, "context_precision", default=0.0) or 0.0),
-            "context_recall": float(self._pick(row, "context_recall", default=0.0) or 0.0),
-        }
 
     def _score_and_select(self, df_results: pd.DataFrame, top_k: int) -> pd.DataFrame:
         required = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
@@ -184,7 +143,6 @@ class RAGAnalyst:
 
         # 先按评估分数构建候选集。
         work["avg_score"] = work[required].mean(axis=1)
-
         # 关键改进：排除“正确拒答”样本，避免将其误报为坏案例。
         # 典型场景：标准答案就是“无法回答”，模型也确实返回“无法回答”。
         work["is_correct_abstention"] = work.apply(
@@ -213,17 +171,29 @@ class RAGAnalyst:
 
         reports: List[Dict] = []
         for idx, row in worst_cases.iterrows():
-            item = self._normalize_case(row)
+            item = EvalResultSample(
+                sample_id=str(row.get("sample_id", "")),
+                sample_batch_id=int(row.get("sample_batch_id", 1) or 1),
+                question=str(row.get("question", "")),
+                answer=str(row.get("answer", "")),
+                contexts=self._to_text_list(row.get("contexts", [])),
+                ground_truth=str(row.get("ground_truth", "")),
+                ground_truth_contexts=self._to_text_list(row.get("ground_truth_contexts", [])),
+                faithfulness=float(row.get("faithfulness", 0.0) or 0.0),
+                answer_relevancy=float(row.get("answer_relevancy", 0.0) or 0.0),
+                context_precision=float(row.get("context_precision", 0.0) or 0.0),
+                context_recall=float(row.get("context_recall", 0.0) or 0.0),
+            )
             payload = {
-                "question": item["question"],
-                "contexts": "\n".join(item["contexts"]),
-                "answer": item["answer"],
-                "ground_truth": item["ground_truth"],
-                "ground_truth_contexts": "\n".join(item["ground_truth_contexts"]),
-                "faithfulness": item["faithfulness"],
-                "answer_relevancy": item["answer_relevancy"],
-                "context_precision": item["context_precision"],
-                "context_recall": item["context_recall"],
+                "question": item.question,
+                "contexts": "\n".join(item.contexts),
+                "answer": item.answer,
+                "ground_truth": item.ground_truth,
+                "ground_truth_contexts": "\n".join(item.ground_truth_contexts),
+                "faithfulness": item.faithfulness,
+                "answer_relevancy": item.answer_relevancy,
+                "context_precision": item.context_precision,
+                "context_recall": item.context_recall,
             }
 
             try:
@@ -238,21 +208,21 @@ class RAGAnalyst:
             reports.append(
                 {
                     "id": idx,
-                    "sample_id": item["sample_id"],
-                    "sample_batch_id": item["sample_batch_id"],
-                    "question": item["question"],
-                    "answer": item["answer"],
-                    "contexts": item["contexts"],
-                    "ground_truth": item["ground_truth"],
-                    "ground_truth_contexts": item["ground_truth_contexts"],
+                    "sample_id": item.sample_id,
+                    "sample_batch_id": item.sample_batch_id,
+                    "question": item.question,
+                    "answer": item.answer,
+                    "contexts": item.contexts,
+                    "ground_truth": item.ground_truth,
+                    "ground_truth_contexts": item.ground_truth_contexts,
                     "scores": {
-                        "faithfulness": item["faithfulness"],
-                        "answer_relevancy": item["answer_relevancy"],
-                        "context_precision": item["context_precision"],
-                        "context_recall": item["context_recall"],
+                        "faithfulness": item.faithfulness,
+                        "answer_relevancy": item.answer_relevancy,
+                        "context_precision": item.context_precision,
+                        "context_recall": item.context_recall,
                         "avg_score": float(worst_cases.loc[idx, "avg_score"]),
                     },
-                    "predicted_category": self._auto_categorize_error(item),
+                    "predicted_category": self._auto_categorize_error(item.model_dump()),
                     "diagnosis": diagnosis,
                     "diagnosis_model": diagnosis_model,
                 }
@@ -381,7 +351,6 @@ class RAGAnalyst:
             )
 
         pg = get_postgres_client()
-        RagEvalDiagnosis.__table__.create(bind=pg.engine, checkfirst=True)
         with pg.get_session() as session:
             session.bulk_insert_mappings(RagEvalDiagnosis, rows)
             session.commit()

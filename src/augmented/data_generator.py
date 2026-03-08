@@ -13,11 +13,11 @@ from pydantic import ValidationError
 
 from src.augmented.config import GeneratorConfig, build_default_config
 from src.augmented.llm_router import LLMRouter
-from src.augmented.models import EvalSample
 from src.augmented.prompts import PromptRegistry
 from src.augmented.sinks import PostgresSink
 from src.augmented.sources import MilvusSource
 from src.augmented.strategies import StrategyTask, build_strategies
+from src.schema.augmented_schema import GeneratedSample
 
 logger = logging.getLogger(__name__)
 
@@ -108,9 +108,9 @@ class DatasetGenerator:
                 for raw in raw_samples:
                     try:
                         # [任务执行-5] 字段清洗与结构校验（Pydantic）
-                        if isinstance(raw.get("ground_truth_context"), str):
-                            raw["ground_truth_context"] = [raw["ground_truth_context"]]
-                        valid_samples.append(EvalSample(**raw).model_dump())
+                        if isinstance(raw.get("ground_truth_contexts"), str):
+                            raw["ground_truth_contexts"] = [raw["ground_truth_contexts"]]
+                        valid_samples.append(GeneratedSample(**raw).model_dump())
                     except ValidationError:
                         validation_failed += 1
                         continue
@@ -218,9 +218,9 @@ class DatasetGenerator:
                         "id": f"gen_{now_ts}_{strategy_name}_{first_idx}_{sample_idx}",
                         "category": sample.get("category", task.source_metadata.get("category", "general")),
                         "difficulty": sample["difficulty"],
-                        "query": sample["query"],
-                        "ground_truth_context": sample["ground_truth_context"],
-                        "ground_truth_answer": sample["ground_truth_answer"],
+                        "question": sample["question"],
+                        "ground_truth_contexts": sample["ground_truth_contexts"],
+                        "ground_truth": sample["ground_truth"],
                         "source_document": sample.get("source_document") or source_document,
                         "model_name": model_used or self.config.default_model_name,
                         "metadata": sample_meta,
@@ -244,3 +244,4 @@ if __name__ == "__main__":
 
     generator = DatasetGenerator()
     generator.generate()
+

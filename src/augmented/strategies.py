@@ -92,10 +92,10 @@ class AdversarialStrategy(BaseGenerationStrategy):
     def postprocess_samples(self, samples: List[Dict[str, Any]], _task: StrategyTask) -> List[Dict[str, Any]]:
         # 对抗题目的标准答案由程序强制注入，避免模型偏离指令。
         for s in samples:
-            s["ground_truth_answer"] = self.fixed_answer
+            s["ground_truth"] = self.fixed_answer
             s["difficulty"] = "hard"
             # 对抗题不应存在可支持答案的证据片段。
-            s["ground_truth_context"] = []
+            s["ground_truth_contexts"] = []
         return samples
 
 
@@ -123,7 +123,7 @@ class MixedPairStrategy(BaseGenerationStrategy):
         random.shuffle(indices)
         # 每两个 chunk 组成一对；pair_count 控制最多取几对。
         max_pairs = max(0, min(self.pair_count, len(indices) // 2))
-        
+
         tasks: List[StrategyTask] = []
         for i in range(max_pairs):
             a_idx = indices[2 * i]
