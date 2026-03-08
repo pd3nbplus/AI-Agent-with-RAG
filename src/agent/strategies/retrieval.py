@@ -33,7 +33,7 @@ class DirectReplyStrategy(BaseAgentStrategy):
 
 
 class FastRetrievalStrategy(BaseAgentStrategy):
-    """事实查询策略：预置单路配置后调用 pipeline，返回 Top-3。"""
+    """事实查询策略：主路 + ES 双路增强，返回 Top-3。"""
 
     name = "fast_retrieval"
 
@@ -48,14 +48,15 @@ class FastRetrievalStrategy(BaseAgentStrategy):
                 "rough_top_k": 3,
             },
             "online": {
-                "enable_rerank": False,
+                "enable_rerank": True,
+                "dynamic_threshold": settings.rag_online.score_threshold,
             },
             "composer": {
-                "enable_hybrid_search": False,
+                "enable_hybrid_search": True,
                 "plugin_rewritten_query": False,
                 "plugin_rewritten_hyde": False,
-                "plugin_es_questions": False,
-                "plugin_es_summaries": False,
+                "plugin_es_questions": True,
+                "plugin_es_summaries": True,
             },
             "filter": {},
         }
@@ -88,7 +89,7 @@ class FastRetrievalStrategy(BaseAgentStrategy):
 
 
 class StandardRetrievalStrategy(BaseAgentStrategy):
-    """标准检索策略：先定义插件/重排参数，再注入 pipeline。"""
+    """标准检索策略：五路召回 + 可选重排。"""
 
     name = "standard_retrieval"
 
@@ -109,9 +110,9 @@ class StandardRetrievalStrategy(BaseAgentStrategy):
             "composer": {
                 "enable_hybrid_search": True,
                 "plugin_rewritten_query": True,
-                "plugin_rewritten_hyde": False,
-                "plugin_es_questions": False,
-                "plugin_es_summaries": False,
+                "plugin_rewritten_hyde": True,
+                "plugin_es_questions": True,
+                "plugin_es_summaries": True,
             },
             "filter": {},
         }
