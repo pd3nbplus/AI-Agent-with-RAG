@@ -345,3 +345,56 @@ flowchart TB
     linkStyle 39 stroke:#ff0000,stroke-width:2px;
     linkStyle 40 stroke:#ff0000,stroke-width:2px;
     linkStyle 41 stroke:#ff0000,stroke-width:2px;
+
+flowchart TD
+    %% --- 节点定义与样式 ---
+    entry["🚀 <b>Entry Point</b><br/>run(query, category)"]:::process
+    router["🧭 <b>Intent Router</b><br/>resolve_strategy()"]:::process
+    
+    decision{"❓ <b>Strategy Decision</b><br/>selected_strategy?"}:::decisionNode
+
+    subgraph strategyPipeline["⚙️ 策略执行管道 (Strategy Pipeline)"]
+        direction LR
+        s1["💬 Direct Reply<br/><i>直接回复</i>"]:::strategy
+        s2["⚡ Fast Retrieval<br/><i>快速检索</i>"]:::strategy
+        s3["📚 Standard Retrieval<br/><i>标准检索</i>"]:::strategy
+        s4["🔍 Deep Search<br/><i>深度搜索</i>"]:::strategy
+        s5["🛠️ Special / Fallback<br/><i>代码/澄清/兜底</i>"]:::strategy
+    end
+
+    composer["🧩 <b>Response Composer</b><br/>compose_final_answer()"]:::process
+    output["📦 <b>Final Output</b><br/>RoutedExecution Object"]:::storage
+
+    %% --- 连接关系 ---
+    entry --> router
+    router --> decision
+    
+    decision --> s1
+    decision --> s2
+    decision --> s3
+    decision --> s4
+    decision --> s5
+
+    s1 --> composer
+    s2 --> composer
+    s3 --> composer
+    s4 --> composer
+    s5 --> composer
+
+    composer --> output
+
+    %% --- 输出内容细节 (使用子图或注释展示结构) ---
+    subgraph outputDetail[" "]
+        direction TB
+        output -.-> detail["<i>最终结果:</i> decision + result + final_answer"]
+    end
+    style outputDetail fill:none,stroke:none
+
+    %% --- 样式定义 ---
+    classDef process fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1;
+    classDef decisionNode fill:#fff3e0,stroke:#ef6c00,stroke-width:3px,color:#e65100,shape:rhombus;
+    classDef strategy fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px,color:#1b5e20,stroke-dasharray: 5 5;
+    classDef storage fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
+
+    %% 特殊高亮：如果是 fallback 策略，可以单独加红色边框（可选）
+    class s5 stroke:#d32f2f,stroke-width:2px;
