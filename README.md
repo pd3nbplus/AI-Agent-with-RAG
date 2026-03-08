@@ -51,6 +51,10 @@
 
 ![](img/04离线数据管道.png)
 
+![](img/意图识别路由转发.png)
+
+![](img/self_rag系统架构图.png)
+
 ---
 
 ## 🚀 快速开始 (Quick Start)
