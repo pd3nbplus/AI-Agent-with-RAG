@@ -1,17 +1,31 @@
-{
-  "_comment": "LLM 按数组顺序依次调用；前一个失败才会尝试下一个。",
-  "llms": [
+﻿{
+  "_comment": "支持分组：generator_llms 用于测试集生成，analyst_llms 用于分析器；llms 保留为向后兼容默认入口。",
+  "generator_llms": [
     {
       "url": "https://api-inference.modelscope.cn/v1/",
-      "model": "MiniMax/MiniMax-M2.5",
+      "model": "ZhipuAI/GLM-5",
       "api_key": "ms-02d60235-2ddc-4431-b158-b8ea872682ec",
       "temperature": 0.7
     },
     {
       "url": "https://open.bigmodel.cn/api/paas/v4",
-      "model": "GLM-4.6V-Flash",
+      "model": "GLM-4-Flash-250414",
       "api_key": "3c703b425855408fb537cd9a1ac3dc15.G4GBa8NQgUCYBI3Z",
       "temperature": 0.7
+    }
+  ],
+  "analyst_llms": [
+    {
+      "url": "https://api-inference.modelscope.cn/v1/",
+      "model": "MiniMax/MiniMax-M2.5",
+      "api_key": "ms-02d60235-2ddc-4431-b158-b8ea872682ec",
+      "temperature": 0.2
+    },
+    {
+      "url": "https://open.bigmodel.cn/api/paas/v4",
+      "model": "GLM-4.7-FlashX",
+      "api_key": "3c703b425855408fb537cd9a1ac3dc15.G4GBa8NQgUCYBI3Z",
+      "temperature": 0.2
     }
   ]
 }

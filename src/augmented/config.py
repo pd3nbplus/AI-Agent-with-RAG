@@ -1,5 +1,6 @@
 # 该模块负责评估数据生成器的最小运行配置：
 # 只保留任务规模、提示词配置和 LLM JSON 配置文件路径。
+# augmented/config.py
 import os
 from dataclasses import dataclass
 
@@ -27,6 +28,8 @@ class GeneratorConfig:
     # 策略参数透传（JSON 字符串），示例：
     # {"standard":{"num_questions":2},"adversarial":{"num_questions":1},"mixed_pair":{"pair_count":2,"num_questions":3}}
     strategy_params_json: str = "{}"
+    # 评测样本批次号：写入 rag_eval_samples.batch_id，便于按批次抽样评估。
+    sample_batch_id: int = 1
 
 
 def build_default_config() -> GeneratorConfig:
@@ -40,4 +43,5 @@ def build_default_config() -> GeneratorConfig:
         default_model_name=settings.llm.model_name,
         enabled_strategies=os.getenv("EVAL_ENABLED_STRATEGIES", "adversarial,mixed_pair"),
         strategy_params_json=os.getenv("EVAL_STRATEGY_PARAMS_JSON", "{}"),
+        sample_batch_id=int(os.getenv("EVAL_SAMPLE_BATCH_ID", "1")),
     )

@@ -162,3 +162,186 @@ flowchart TD
     linkStyle 12 stroke:#ff0000,stroke-width:2px;
     linkStyle 14 stroke:#ff0000,stroke-width:2px;
     linkStyle 16 stroke:#ff0000,stroke-width:2px;
+
+flowchart TB
+    %% 1. 初始化与入口
+    cfg["⚙️ Config<br/>配置层"] --> orchestrator
+    subgraph test_data["🏭 测试数据生成 (Data Generator)"]
+        direction TB
+        %% 2. 数据源与预处理
+        orchestrator["🎼 Orchestrator<br/>编排控制入口"] --> extractor["📥 Extractor<br/>数据源层<br/>(向量库抽取)"]
+        extractor --> filter["📏 Filter<br/>长度过滤"]
+        
+        %% 3. 策略层子图
+        subgraph strategy_pool["♟️ 策略池 (Strategies)"]
+            direction LR
+            std_strat["📝 Standard<br/>标准策略"]
+            adv_strat["⚔️ Adversarial<br/>对抗策略"]
+            rand_strat["🧩 Random<br/>随机拼接策略"]
+        end
+
+        %% 4. 模型访问层子图
+        subgraph llm_cluster["🤖 LLM 集群<br/>(按顺序降级调用)"]
+            direction LR
+            llm_1["🧠 Model 1<br/>主模型"]
+            llm_2["🧠 Model 2<br/>备选 1"]
+            llm_3["🧠 Model 3<br/>备选 2"]
+        end
+
+        %% 5. 后处理与落库
+        validator["✅ 校验与标准化层
+            JSON解析 + 结构校验 + 元数据补全"]
+        
+
+        %% --- 连接关系 ---
+        
+        %% 编排层直接控制策略池和校验层
+        orchestrator --> strategy_pool
+        orchestrator --> validator
+
+        %% 数据流向：过滤 -> 策略
+        filter --> std_strat
+        filter --> adv_strat
+        filter --> rand_strat
+
+        %% 策略 -> 主模型
+        std_strat --> llm_1
+        adv_strat --> llm_1
+        rand_strat --> llm_1
+
+        %% 模型调用链 (带降级逻辑)
+        llm_1 --> validator
+        llm_1 -.失败降级.-> llm_2
+        llm_2 --> validator
+        llm_2 -.失败降级.-> llm_3
+        llm_3 --> validator
+
+        
+    end
+    validator --> sink
+    sink["💾 pgsql<br/>持久化层、数据库写入"]
+    
+    cfg["⚙️ Config<br/>配置层"] --> orchestrator1
+    subgraph evaluator["📊 评估执行 (Evaluator)"]
+        direction TB
+        
+        %% 2. 数据准备
+        orchestrator1["🎼 Orchestrator<br/>编排控制入口"] --> sampler["🗄️ Sampler<br/>样本读取层<br/>(按 batch_id 取样)"]
+        
+        %% 3. 推理引擎子图 (检索 + 生成)
+        subgraph inference_engine["🧠 检索与回答引擎 (Inference)"]
+            direction LR
+            retriever["🔍 Retriever<br/>Pipeline 检索"]
+            generator["💬 Generator<br/>Answer LLM + Prompt"]
+            
+            retriever --> generator
+        end
+
+        %% 4. 评测指标子图
+        subgraph metrics_suite["📈 评测指标套件 (RAGAS)"]
+            direction LR
+            m_faith["✅ Faithfulness"]
+            m_rel["🎯 Answer Relevancy"]
+            m_prec["📏 Context Precision"]
+            m_rec["♻️ Context Recall"]
+        end
+
+        %% 5. 后处理与落库
+        formatter["🧹 Formatter<br/>结果组装层<br/>(字段映射 + Think 清理)"]
+
+        %% --- 主流程连接 ---
+        sampler --> retriever
+        orchestrator1 --> inference_engine
+        
+        generator --> formatter
+        
+        formatter --> metrics_suite
+        
+    end
+        %% 指标计算完成后通常也需要更新结果或单独存储，这里假设汇入 sink 或独立输出
+        metrics_suite --> sink
+
+    cfg["⚙️ Config<br/>配置层"] --> entry
+    subgraph analyst["🔍 坏案例诊断 (Analyst)"]
+        direction TB
+        %% 2. 数据读取
+        entry["🚀 Entry<br/>analyze(...)"] --> loader["📥 Loader<br/>读取评估结果<br/>(by eval_run_id)"]
+
+        %% 3. 筛选逻辑子图
+        subgraph filter_stage["🌪️ 筛选阶段 (Filtering)"]
+            direction LR
+            validator2["✅ Validator<br/>指标归一化"]
+            cleaner["🧹 Cleaner<br/>排除正确拒答"]
+            ranker["🏆 Ranker<br/>Top-K 坏案例"]
+            
+            validator2 --> cleaner --> ranker
+        end
+
+        %% 4. 诊断模型子图
+        subgraph model_stage["🤖 诊断模型集群 (Diagnosis LLMs)"]
+            direction LR
+            diag_llm_1["🧠 Model 1<br/>主模型"]
+            diag_llm_2["🧠 Model 2<br/>备选 1"]
+            diag_llm_3["🧠 Model 3<br/>备选 2"]
+        end
+
+        %% 5. 后续处理
+        builder[""诊断构建层
+                组装 prompt + 生成 diagnosis""]
+        reporter["📄 报告层
+                生成 case markdown + 汇总 self.report"]
+
+        %% --- 连接关系 ---
+        entry --> filter_stage
+        loader --> validator2
+        
+        filter_stage --> builder
+        ranker --> diag_llm_1
+        
+        diag_llm_1 --> builder
+        diag_llm_1 -.失败降级.-> diag_llm_2
+        diag_llm_2 --> builder
+        diag_llm_2 -.失败降级.-> diag_llm_3
+        diag_llm_3 --> builder
+
+        builder --> reporter
+    end
+        reporter --> sink
+        sink1["💾 pgsql数据接入"]
+        sink1 --> loader
+        sink1 --> sampler
+
+    linkStyle 2 stroke:#ff0000,stroke-width:2px;
+    linkStyle 5 stroke:#ff0000,stroke-width:2px;
+    linkStyle 6 stroke:#ff0000,stroke-width:2px;
+    linkStyle 7 stroke:#ff0000,stroke-width:2px;
+    linkStyle 8 stroke:#ff0000,stroke-width:2px;
+    linkStyle 8 stroke:#ff0000,stroke-width:2px;
+    linkStyle 9 stroke:#ff0000,stroke-width:2px;
+    linkStyle 10 stroke:#ff0000,stroke-width:2px;
+    linkStyle 11 stroke:#ff0000,stroke-width:2px;
+    linkStyle 12 stroke:#ff0000,stroke-width:2px;
+    linkStyle 13 stroke:#ff0000,stroke-width:2px;
+    linkStyle 14 stroke:#ff0000,stroke-width:2px;
+    linkStyle 15 stroke:#ff0000,stroke-width:2px;
+    linkStyle 16 stroke:#ff0000,stroke-width:2px;
+    linkStyle 19 stroke:#ff0000,stroke-width:2px;
+    linkStyle 20 stroke:#ff0000,stroke-width:2px;
+    linkStyle 22 stroke:#ff0000,stroke-width:2px;
+    linkStyle 23 stroke:#ff0000,stroke-width:2px;
+    linkStyle 24 stroke:#ff0000,stroke-width:2px;
+    linkStyle 24 stroke:#ff0000,stroke-width:2px;
+    linkStyle 27 stroke:#ff0000,stroke-width:2px;
+    linkStyle 28 stroke:#ff0000,stroke-width:2px;
+    linkStyle 30 stroke:#ff0000,stroke-width:2px;
+    linkStyle 31 stroke:#ff0000,stroke-width:2px;
+    linkStyle 32 stroke:#ff0000,stroke-width:2px;
+    linkStyle 33 stroke:#ff0000,stroke-width:2px;
+    linkStyle 34 stroke:#ff0000,stroke-width:2px;
+    linkStyle 35 stroke:#ff0000,stroke-width:2px;
+    linkStyle 36 stroke:#ff0000,stroke-width:2px;
+    linkStyle 37 stroke:#ff0000,stroke-width:2px;
+    linkStyle 38 stroke:#ff0000,stroke-width:2px;
+    linkStyle 39 stroke:#ff0000,stroke-width:2px;
+    linkStyle 40 stroke:#ff0000,stroke-width:2px;
+    linkStyle 41 stroke:#ff0000,stroke-width:2px;

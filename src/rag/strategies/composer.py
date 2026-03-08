@@ -5,52 +5,85 @@ from src.rag.strategies.retrievers.vector_rewritten import VectorRewrittenRetrie
 from src.rag.strategies.retrievers.es_questions import ESQuestionsRetriever
 from src.rag.strategies.retrievers.es_summaries import ESSummariesRetriever # 导入新插件
 from src.rag.fusion.rrf import RRFFusionEngine
+from src.core.milvus_client import get_milvus_client
+from src.core.es_client import get_es_client
 from src.core.config import settings
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 import logging
 import asyncio
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ComposerConfig:
+    """RetrieverComposer 运行时配置，可由实验代码动态注入。"""
+    enable_hybrid_search: bool = settings.search.enable_hybrid_search
+    plugin_rewritten_query: bool = settings.search.plugin_rewritten_query
+    plugin_rewritten_hyde: bool = settings.search.plugin_rewritten_hyde
+    plugin_es_questions: bool = settings.search.plugin_es_questions
+    plugin_es_summaries: bool = settings.search.plugin_es_summaries
+    rrf_k: int = settings.search.rrf_k
+    es_host: Optional[str] = settings.db.es_host
+    milvus_config: Optional[Dict[str, Any]] = None
+    es_config: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def from_any(cls, value: Optional["ComposerConfig | Dict[str, Any]"]) -> "ComposerConfig":
+        if value is None:
+            return cls()
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, dict):
+            allowed = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+            payload = {k: v for k, v in value.items() if k in allowed}
+            return cls(**payload)
+        raise TypeError("composer config must be None, ComposerConfig or dict")
+
 
 class RetrieverComposer:
     """
     检索器组装器
     职责：根据配置动态加载多个检索插件，并行执行，并使用 RRF 融合结果。
     """
-    def __init__(self):
+    def __init__(self, config: Optional[ComposerConfig | Dict[str, Any]] = None):
+        self.config = ComposerConfig.from_any(config)
         self.retrievers: List[BaseRetrievalStrategy] = []
-        self.rrf_engine = RRFFusionEngine(k=settings.search.rrf_k)
+        self.rrf_engine = RRFFusionEngine(k=self.config.rrf_k)
+        self.milvus_client = get_milvus_client(self.config.milvus_config)
+        self.es_client = get_es_client(self.config.es_config)
         
         self._load_plugins()
 
     def _load_plugins(self):
         """根据配置动态加载插件"""
         # 1. 主路：永远加载
-        self.retrievers.append(VectorTextRetriever())
+        self.retrievers.append(VectorTextRetriever(milvus_client=self.milvus_client))
         logger.info("✅ [Composer] 已加载主路：VectorText")
         
         # 2. 变体路：如果开启混合检索
-        if settings.search.enable_hybrid_search:
+        if self.config.enable_hybrid_search:
             # 2. 改写路：如果开启改写
-            if settings.search.plugin_rewritten_query:
-                self.retrievers.append(VectorRewrittenRetriever('standard'))
+            if self.config.plugin_rewritten_query:
+                self.retrievers.append(VectorRewrittenRetriever('standard', milvus_client=self.milvus_client))
                 logger.info("✅ [Composer] 已加载变体路：VectorRewritten-standard")
             
-            if settings.search.plugin_rewritten_hyde:
-                self.retrievers.append(VectorRewrittenRetriever('hyde'))
+            if self.config.plugin_rewritten_hyde:
+                self.retrievers.append(VectorRewrittenRetriever('hyde', milvus_client=self.milvus_client))
                 logger.info("✅ [Composer] 已加载变体路：VectorRewritten-hyde")
 
             # 3. ES 路：如果配置了 ES
-            if settings.db.es_host:
+            if self.config.es_host:
                 # 3. ES - Questions 路
-                if settings.search.plugin_es_questions:
-                    es_retriever = ESQuestionsRetriever()
+                if self.config.plugin_es_questions:
+                    es_retriever = ESQuestionsRetriever(es_client=self.es_client)
                     if es_retriever.es.is_available(): # 只有连接成功才加入
                         self.retrievers.append(es_retriever)
                         logger.info("✅ [Composer] 已加载 ES - Questions 路：ESQuestions")
                 # 4. ES - Summaries 路
-                if settings.search.plugin_es_summaries:
-                    es_retriever = ESSummariesRetriever()
+                if self.config.plugin_es_summaries:
+                    es_retriever = ESSummariesRetriever(es_client=self.es_client)
                     if es_retriever.es.is_available(): # 只有连接成功才加入
                         self.retrievers.append(es_retriever)
                         logger.info("✅ [Composer] 已加载 ES - Summaries 路：ESSummaries")

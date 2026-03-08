@@ -1,6 +1,6 @@
 # src/rag/strategies/retrievers/vector_rewritten.py
 from src.rag.strategies.base import BaseRetrievalStrategy, SearchResult
-from src.core.milvus_client import get_milvus_client
+from src.core.milvus_client import MilvusClient, get_milvus_client
 from src.rag.rewriter import get_rewriter # 复用之前的重写器
 from typing import List, Optional
 import logging
@@ -13,10 +13,10 @@ class VectorRewrittenRetriever(BaseRetrievalStrategy):
     插件 2: 变体向量检索
     策略：先让 LLM 重写查询 (Query Rewriting)，再用重写后的句子进行向量搜索。
     """
-    def __init__(self, strategy_name: str = "standard"):
-        self.milvus = get_milvus_client()
+    def __init__(self, strategy_name: str = "standard", milvus_client: MilvusClient = None):
+        self.milvus = milvus_client or get_milvus_client()
         self.rewriter = get_rewriter(strategy_name=strategy_name)
-
+        self.strategy_name = strategy_name
         logger.info(f"🔌 [Plugin] 加载变体向量检索插件 ({strategy_name})")
 
     def search(self, query: str, top_k: int, filter_expr: Optional[str] = None, **kwargs) -> List[SearchResult]:
@@ -26,13 +26,13 @@ class VectorRewrittenRetriever(BaseRetrievalStrategy):
             if rewritten_query == query:
                 logger.debug("⚠️ [Vector-Rewritten] 重写后无变化，跳过此路以避免重复")
                 return []
-            logger.info(f"🔄 [Vector-Rewritten] 变体查询：{rewritten_query}")
+            logger.info(f"🔄 [Vector-Rewritten] 变体{[self.strategy_name]}查询：{rewritten_query}")
         except Exception as e:
             logger.error(f"❌ [Vector-Rewritten] 重写失败：{e}")
             return []
         
         hits = self.milvus.search(
-            query=query,
+            query=rewritten_query,
             top_k=top_k,
             filter_expr=filter_expr,
             output_fields=["text", "metadata"]
@@ -52,7 +52,7 @@ class VectorRewrittenRetriever(BaseRetrievalStrategy):
                 # 可选：在 metadata 中记录原始子块文本，方便调试
                 meta['_matched_child_text'] = original_text
 
-        results.append(SearchResult(
+            results.append(SearchResult(
                 text=final_text, # 返回大块文本给 LLM
                 score=hit['score'], # 分数基于小子块匹配 (精准)
                 metadata=meta,

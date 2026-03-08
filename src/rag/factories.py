@@ -75,12 +75,19 @@ class ChunkerFactory:
             )
 
 class RerankerFactory:
+    _instance: Reranker | None = None
+
     @staticmethod
     def get_reranker() -> Reranker | None:
         if not settings.rag_online.enable_rerank:
             logger.info("🚫 重排序已禁用，返回 None")
             return None
-        
-        logger.info(f"🏭 工厂正在构建重排器：{settings.rag_online.rerank_model_name}")
-        # 直接实例化之前的 Reranker 类，它内部会读取 config
-        return Reranker()
+
+        # 单进程单例：避免同一进程内多次加载 bge-reranker-base
+        if RerankerFactory._instance is None:
+            logger.info(f"🏭 工厂正在构建重排器：{settings.rag_online.rerank_model_name}")
+            # 直接实例化之前的 Reranker 类，它内部会读取 config
+            RerankerFactory._instance = Reranker()
+        else:
+            logger.info("♻️ 复用已加载的重排器实例")
+        return RerankerFactory._instance

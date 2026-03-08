@@ -1,4 +1,5 @@
-# Augmented 包对外只暴露 DatasetGenerator，其他模块作为内部实现细节使用。
+# Augmented 包对外暴露常用入口类，便于上层直接 import。
 from .data_generator import DatasetGenerator
+from .analyst import RAGAnalyst
 
-__all__ = ["DatasetGenerator"]
+__all__ = ["DatasetGenerator", "RAGAnalyst"]

@@ -2,15 +2,43 @@
 from elasticsearch import Elasticsearch, helpers
 from src.core.config import settings
 import logging
-from typing import Optional, List, Dict
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class ESClientConfig:
+    host: str = settings.db.es_host
+    index_questions: str = settings.db.es_index_questions
+    index_summaries: str = settings.db.es_index_summaries
+    user: Optional[str] = settings.db.es_user
+    password: Optional[str] = settings.db.es_password
+    request_timeout: int = 30
+
+    @classmethod
+    def from_any(cls, value: Optional["ESClientConfig | Dict[str, Any]"]) -> "ESClientConfig":
+        if value is None:
+            return cls()
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, dict):
+            allowed = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+            payload = {k: v for k, v in value.items() if k in allowed}
+            return cls(**payload)
+        raise TypeError("ES config must be None, ESClientConfig or dict")
+
+
 class ESClient:
-    def __init__(self):
-        self.host = settings.db.es_host
-        self.index_questions = settings.db.es_index_questions
-        self.index_summaries = settings.db.es_index_summaries
+    def __init__(self, config: Optional[ESClientConfig | Dict[str, Any]] = None):
+        cfg = ESClientConfig.from_any(config)
+        self.host = cfg.host
+        self.index_questions = cfg.index_questions
+        self.index_summaries = cfg.index_summaries
+        self.user = cfg.user
+        self.password = cfg.password
+        self.request_timeout = cfg.request_timeout
         self.client: Optional[Elasticsearch] = None
         self._connect()
 
@@ -22,8 +50,8 @@ class ESClient:
             # 尝试连接
             self.client = Elasticsearch(
                 hosts=hosts,
-                basic_auth=(settings.db.es_user, settings.db.es_password) if settings.db.es_user else None,
-                request_timeout=30
+                basic_auth=(self.user, self.password) if self.user else None,
+                request_timeout=self.request_timeout
             )
             
             # 测试连通性
@@ -290,5 +318,24 @@ class ESClient:
             import traceback
             traceback.print_exc()
 
-# 单例
+# 单例（默认配置）与按配置缓存实例
 es_client_instance = ESClient()
+es_client_instances: Dict[tuple, ESClient] = {}
+
+
+def get_es_client(config: Optional[ESClientConfig | Dict[str, Any]] = None) -> ESClient:
+    if config is None:
+        return es_client_instance
+
+    cfg = ESClientConfig.from_any(config)
+    cache_key = (
+        cfg.host,
+        cfg.index_questions,
+        cfg.index_summaries,
+        cfg.user,
+        cfg.password,
+        cfg.request_timeout,
+    )
+    if cache_key not in es_client_instances:
+        es_client_instances[cache_key] = ESClient(cfg)
+    return es_client_instances[cache_key]

@@ -1,3 +1,4 @@
+import os
 from typing import Optional, List, Dict, Any
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -5,6 +6,13 @@ from dotenv import load_dotenv
 
 # 加载 .env 文件 (兼容旧习惯，Pydantic-settings 也会自动加载，但显式调用更稳妥)
 load_dotenv()
+
+# HuggingFace 离线模式开关：
+# 默认启用离线，避免模型加载时频繁 HEAD/GET 请求。
+# 如需临时联网，可在环境变量中设置 HF_OFFLINE=0。
+if os.getenv("HF_OFFLINE", "1").lower() in ("1", "true", "yes", "on"):
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 class AppSettings(BaseSettings):
     """应用基础信息"""

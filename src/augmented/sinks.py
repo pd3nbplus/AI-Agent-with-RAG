@@ -1,3 +1,4 @@
+# augmented/sinks.py
 # 存储模块：将评估样本批量 upsert 到 PostgreSQL。
 from typing import Any, Dict, List
 
@@ -23,6 +24,7 @@ class PostgresSink:
         # 兼容已存在旧表：补齐新增字段（不会覆盖历史数据）。
         with self.client.engine.begin() as conn:
             conn.execute(text("ALTER TABLE rag_eval_samples ADD COLUMN IF NOT EXISTS model_name VARCHAR(128)"))
+            conn.execute(text("ALTER TABLE rag_eval_samples ADD COLUMN IF NOT EXISTS batch_id INTEGER DEFAULT 1"))
 
     def save(self, rows: List[Dict[str, Any]]) -> None:
         if not rows:
@@ -45,6 +47,7 @@ class PostgresSink:
                     "source_chunk_index": row["source_chunk_index"],
                     "source_backend": row.get("source_backend", "milvus"),
                     "created_at": row["created_at"],
+                    "batch_id": int(row.get("batch_id", 1)),
                 }
             )
 
@@ -63,6 +66,7 @@ class PostgresSink:
                 "source_chunk_index": upsert_stmt.excluded.source_chunk_index,
                 "source_backend": upsert_stmt.excluded.source_backend,
                 "created_at": upsert_stmt.excluded.created_at,
+                "batch_id": upsert_stmt.excluded.batch_id,
             },
         )
 

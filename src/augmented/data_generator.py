@@ -1,3 +1,4 @@
+# augmented/data_generator.py
 # 主编排器（策略模式）：
 # Milvus 取 chunk -> 按策略构建任务 -> LLM 生成评估样本 -> PostgreSQL 持久化。
 import ast
@@ -226,6 +227,8 @@ class DatasetGenerator:
                         "source_chunk_index": first_idx,
                         "source_backend": "milvus",
                         "created_at": now_ts,
+                        # 记录该题目属于哪个评测批次，后续可按批次回放评估。
+                        "batch_id": int(self.config.sample_batch_id),
                     }
                 )
 

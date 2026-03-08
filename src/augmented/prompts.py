@@ -1,3 +1,4 @@
+# augmented/prompts.py
 # Prompt 注册中心：集中管理不同出题风格模板，按 profile 选择。
 STANDARD_PROMPT = """
 你是一个专业的 RAG 评估数据集构建专家。

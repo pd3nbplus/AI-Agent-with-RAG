@@ -90,5 +90,5 @@ class Reranker:
             ) for i, cand in enumerate(final_results)
         ]
 
-# 单例
-reranker_instance = Reranker()
+# 注意：不要在模块导入时创建全局实例。
+# 统一通过 RerankerFactory.get_reranker() 懒加载并复用。

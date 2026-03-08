@@ -1,6 +1,6 @@
 # src/rag/strategies/retrievers/es_questions.py
 from src.rag.strategies.base import BaseRetrievalStrategy, SearchResult
-from src.core.es_client import es_client_instance
+from src.core.es_client import ESClient, get_es_client
 from src.core.config import settings
 from typing import List, Optional
 import logging
@@ -11,8 +11,8 @@ class ESQuestionsRetriever(BaseRetrievalStrategy):
     """
     插件 3: ES 关键词检索 (Questions 字段)
     """
-    def __init__(self):
-        self.es = es_client_instance
+    def __init__(self, es_client: ESClient = None):
+        self.es = es_client or get_es_client()
         self.index_name = settings.db.es_index_questions
         if self.es.is_available():
             logger.info(f"🔌 [Plugin] ES 检索插件{self.index_name}已就绪")

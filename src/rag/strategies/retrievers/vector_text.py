@@ -1,6 +1,6 @@
 # src/rag/strategies/retrievers/vector_text.py
 from src.rag.strategies.base import BaseRetrievalStrategy, SearchResult
-from src.core.milvus_client import get_milvus_client
+from src.core.milvus_client import MilvusClient, get_milvus_client
 import logging
 from typing import List
 import os
@@ -13,8 +13,8 @@ class VectorTextRetriever(BaseRetrievalStrategy):
     目标字段：text
     输入查询：原始查询
     """
-    def __init__(self):
-        self.milvus = get_milvus_client()
+    def __init__(self, milvus_client: MilvusClient = None):
+        self.milvus = milvus_client or get_milvus_client()
         logger.info(f"🔌 [Plugin] 加载原文向量插件 VectorTextRetriever")
 
     def search(self, query: str, top_k: int, filter_expr: str = None, **kwargs) -> List[SearchResult]:

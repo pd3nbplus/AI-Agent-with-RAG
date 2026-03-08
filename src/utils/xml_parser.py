@@ -21,7 +21,8 @@ def extract_tool_calls_from_content(content: str):
     return tool_calls
 
 def remove_think_and_n(content: str) -> str:
-    """移除 <think> 和 </think> 标记 和 \n，并替换换行符为单空格"""
-    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-    content = re.sub(r'\n', '', content)
+    """移除 <think>...</think>，保留正文换行结构。"""
+    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE)
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+    content = re.sub(r"\n{3,}", "\n\n", content)
     return content.strip()

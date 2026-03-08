@@ -1,12 +1,12 @@
-# LLM 路由模块：
-# 从一个 JSON 文件加载多个 endpoint，并按顺序调用（失败则降级到下一个）。
+﻿# augmented/llm_router.py
+# LLM 路由模块：从 JSON 加载多端点并按顺序降级调用。
 import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
 
 from src.augmented.config import GeneratorConfig
 from src.utils.xml_parser import remove_think_and_n
@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LLMEndpoint:
-    # 对应 JSON 里的单个 LLM 节点配置。
     url: str
     model: str
     api_key: str
@@ -24,22 +23,34 @@ class LLMEndpoint:
 
 
 class LLMRouter:
-    def __init__(self, config: GeneratorConfig) -> None:
+    def __init__(self, config: GeneratorConfig, llm_group: Optional[str] = None) -> None:
         self.config = config
-        self.endpoints = self._load_endpoints(config.llm_json_path)
-        # 实例级降级游标：
-        # 一旦第 k 个失败，后续调用将从第 k+1 个开始，不再尝试前 k 个。
+        self.llm_group = llm_group
+        self.endpoints = self._load_endpoints(config.llm_json_path, llm_group=llm_group)
+        # 实例级降级游标：第 k 个失败后，下次从 k+1 开始。
         self._degrade_start_idx = 0
 
-    def _load_endpoints(self, json_path: str) -> List[LLMEndpoint]:
-        # 支持两种 JSON 形态：
-        # 1) {"llms": [...]} 2) [...]
-        with open(json_path, "r", encoding="utf-8") as f:
+    def _load_endpoints(self, json_path: str, llm_group: Optional[str] = None) -> List[LLMEndpoint]:
+        # 支持形态：
+        # 1) {"generator_llms": [...], "analyst_llms": [...], "llms": [...]} 
+        # 2) {"llms": [...]} 
+        # 3) [...]
+        # Use utf-8-sig to be compatible with JSON files saved with BOM.
+        with open(json_path, "r", encoding="utf-8-sig") as f:
             payload = json.load(f)
 
-        records = payload.get("llms", payload) if isinstance(payload, dict) else payload
+        if isinstance(payload, dict):
+            if llm_group and isinstance(payload.get(llm_group), list):
+                records = payload[llm_group]
+            elif isinstance(payload.get("generator_llms"), list):
+                records = payload["generator_llms"]
+            else:
+                records = payload.get("llms", payload)
+        else:
+            records = payload
+
         if not isinstance(records, list) or not records:
-            raise ValueError(f"LLM JSON 配置无效或为空: {json_path}")
+            raise ValueError(f"LLM JSON 配置无效或为空: {json_path}, group={llm_group}")
 
         endpoints: List[LLMEndpoint] = []
         for item in records:
@@ -54,7 +65,6 @@ class LLMRouter:
         return endpoints
 
     def invoke(self, prompt: ChatPromptTemplate, payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-        # 顺序降级：第一个 endpoint 失败后切到下一个。
         last_error: Optional[Exception] = None
         for idx in range(self._degrade_start_idx, len(self.endpoints)):
             ep = self.endpoints[idx]
@@ -72,9 +82,8 @@ class LLMRouter:
                     return text, ep.model
             except Exception as e:
                 last_error = e
-                # 触发实例级熔断：失败的当前节点及其之前节点都不再尝试。
                 self._degrade_start_idx = max(self._degrade_start_idx, idx + 1)
-                logger.warning("⚠️ LLM 调用失败，降级到下一个 endpoint。model=%s err=%s", ep.model, e)
+                logger.warning("LLM 调用失败，降级到下一 endpoint。model=%s err=%s", ep.model, e)
                 continue
 
         raise RuntimeError(f"所有 LLM endpoint 调用失败: {last_error}")

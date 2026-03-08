@@ -25,6 +25,10 @@ dependencies = [
     "elasticsearch==8.11.0",
     "jieba",
     "psycopg2",
+    "matplotlib",
+    "ragas",
+    "datasets",
+    "pandas",
 ]
 
 [project.optional-dependencies]

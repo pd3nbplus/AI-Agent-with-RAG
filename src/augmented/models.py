@@ -1,3 +1,4 @@
+# augmented/models.py
 # Pydantic 输出模型：约束 LLM 返回字段，避免脏数据写入数据库。
 from typing import Any, Dict, List, Optional
 

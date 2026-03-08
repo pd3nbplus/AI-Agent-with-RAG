@@ -1,21 +1,21 @@
 # src/rag/pipeline.py
 from src.rag.factories import RerankerFactory # 👈 新增导入
 from src.rag.strategies.metadata_filter import MetadataFilterBuilder
-from src.rag.strategies.composer import composer_instance # 导入多路召回组件
+from src.rag.strategies.composer import RetrieverComposer, ComposerConfig # 导入多路召回组件
 from src.rag.strategies.base import SearchResult # 👈 导入 SearchResult 类
 from src.core.config import settings
 import logging
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 class RetrievalPipeline:
-    def __init__(self):
+    def __init__(self, composer_config: Optional[ComposerConfig | Dict[str, Any]] = None):
         # 导入元数据过滤组件
         self.filter_builder = MetadataFilterBuilder()
         self.default_filter_category = settings.search.default_filter_category
-        # 导入多路召回组件
-        self.composer = composer_instance
+        # 导入多路召回组件（支持运行时注入配置，便于实验）
+        self.composer = RetrieverComposer(config=composer_config)
         # 👇 修改点：使用工厂获取重排器
         self.reranker = RerankerFactory.get_reranker()
         logger.info(f"⚙️ Pipeline 初始化完成 (重排器：{'已加载' if self.reranker else '未加载'})")
