@@ -1,0 +1,58 @@
+# Self-RAG 实施计划
+
+本目录用于实现一个可迭代检索的 Self-RAG 流程，目标是让系统具备“先回答、再自检、必要时继续检索”的能力。
+
+## 目标
+
+1. 在最多 `max_hops` 轮内完成：检索 -> 生成 -> 自评判 -> 决策。
+2. 当回答可用且有证据支撑时结束；否则执行查询改写并继续检索。
+3. 输出结构化结果：最终回答、证据上下文、每轮评分轨迹、最终决策。
+
+## 目录分工
+
+- `config.py`: Self-RAG 参数配置（阈值、最大轮次、检索配置）。
+- `state.py`: 运行时状态对象与每轮轨迹。
+- `engine.py`: 主编排循环（核心执行入口）。
+- `nodes/`: 各节点逻辑（retrieve/generate/judge/rewrite/decide）。
+- `adapters/`: 现有组件适配层（rag pipeline、trace）。
+- `schemas/`: 评判输出与最终输出结构。
+- Prompt 模板统一放在 `src/core/prompt/`（由 `src/core/prompt_registry.py` 读取）。
+
+## 组件接入计划
+
+1. 检索：复用 `src/rag/pipeline.py`，通过 `config` 透传检索行为。
+2. 生成：使用统一 LLM 适配层，按上下文生成答案。
+3. 评判：
+   - `relevance`: 上下文与问题相关性；
+   - `grounding`: 答案是否由证据支撑；
+   - `utility`: 答案是否满足用户需求。
+4. 改写：当评判失败时重写 query 再检索。
+5. 决策：根据阈值和轮次决定 `finish` / `rewrite` / `fallback`。
+
+## 迭代里程碑
+
+1. M1（当前实现）
+   - 搭建目录和基础类；
+   - 跑通单轮检索+生成+评判；
+   - 支持多轮重写与停止条件；
+   - 产出结构化输出。
+2. M2
+   - 对接现有 `agent/router`，仅在特定意图触发 Self-RAG；
+   - 增加更细粒度评分与拒答策略。
+3. M3
+   - 引入离线评估（augmented）对 Self-RAG 循环质量进行量化；
+   - 增加链路追踪与可观测性字段。
+
+## 本次编码范围
+
+- 完成 M1 可运行版本（以 `SelfRAGEngine` 为入口）。
+- 保持对现有工程低侵入，不改动其他目录。
+
+## 最小自测
+
+- 脚本位置：`src/self_rag/self_test.py`
+- 运行命令（项目根目录）：
+  - `PYTHONPATH=. python3 src/self_rag/self_test.py`
+- 覆盖路径：
+  - 首轮直接完成（`finish`）
+  - 首轮失败后改写再完成（`rewrite -> finish`）

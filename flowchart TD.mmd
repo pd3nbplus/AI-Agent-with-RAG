@@ -398,3 +398,61 @@ flowchart TD
 
     %% 特殊高亮：如果是 fallback 策略，可以单独加红色边框（可选）
     class s5 stroke:#d32f2f,stroke-width:2px;
+
+
+flowchart TD
+    %% 样式定义
+    classDef start fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
+    classDef process fill:#fff9c4,stroke:#fbc02d,stroke-width:1px;
+    classDef decision fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
+    classDef fallback fill:#ffebee,stroke:#c62828,stroke-width:1px,stroke-dasharray: 5 5;
+    classDef endNode fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;
+
+    Start([🚀 Start / Query]):::start --> Init[📝 Init State<br/>构造初始状态]:::process
+    Init --> Route{🧭 Route?<br/>是否进入 Self-RAG?}:::decision
+
+    %% 非 Self-RAG 路径
+    Route --❌ No--> FallbackDirect[⬇️ Fallback Direct<br/>直接降级回复]:::fallback
+    FallbackDirect --> End
+
+    %% Self-RAG 核心循环
+    Route --✅ Yes--> LoopStart((🔄 Loop Start))
+    
+    subgraph CoreLoop [🧠 Self-RAG Core Loop / 核心反思循环]
+        direction TB
+        LoopStart --> Hop[➕ Hop +1<br/>轮次递增]:::process
+        Hop --> Retrieve[🔍 Retrieve<br/>检索上下文]:::process
+        Retrieve --> Generate[✍️ Generate<br/>生成答案+Tokens]:::process
+        Generate --> Judge[⚖️ Judge<br/>评估: Rel/Ground/Util]:::process
+        
+        Judge --> Decide{🤔 Decide Next?<br/>决策下一步}:::decision
+    end
+
+    %% 异常处理统一入口
+    Retrieve -.->|⚠️ Err| FallbackErr
+    Generate -.->|⚠️ Err| FallbackErr
+    Judge -.->|⚠️ Err| FallbackJudge[⬇️ Fallback Judge<br/>评分=0]:::fallback
+    FallbackJudge --> Decide
+
+    FallbackErr[⚠️ Exception<br/>触发降级]:::fallback --> End
+
+    %% 决策分支
+    Decide --✏️ Rewrite--> RewriteCheck{📝 Rewrite OK?<br/>改写有效?}:::decision
+    RewriteCheck --❌ No--> FallbackRewrite[⬇️ Fallback<br/>改写失败]:::fallback
+    FallbackRewrite --> End
+    
+    RewriteCheck --✅ Yes--> UpdateQuery[🔄 Update Query<br/>更新查询词]:::process
+    UpdateQuery --> LoopStart
+
+    Decide --✅ Finish/Success--> Success[🎉 Success<br/>生成成功]:::process
+    Decide --⬇️ Fallback--> FallbackLoop[⬇️ Fallback<br/>达到上限/低分]:::fallback
+
+    %% 结束汇聚
+    Success --> Trace[📜 Record Trace<br/>记录轨迹]:::process
+    FallbackLoop --> Trace
+    Trace --> End([📦 Return Output<br/>返回结果]):::endNode
+    FallbackDirect --> End
+    FallbackErr --> End
+
+    %% 连线优化
+    linkStyle 1,2,3,4,5,6,7,8,9,10,11 stroke:#555,stroke-width:1px;
