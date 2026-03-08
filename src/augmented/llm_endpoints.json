@@ -26,6 +26,12 @@
       "model": "GLM-4.7-FlashX",
       "api_key": "3c703b425855408fb537cd9a1ac3dc15.G4GBa8NQgUCYBI3Z",
       "temperature": 0.2
+    },
+    {
+      "url": "https://open.bigmodel.cn/api/paas/v4",
+      "model": "GLM-4-Flash-250414",
+      "api_key": "3c703b425855408fb537cd9a1ac3dc15.G4GBa8NQgUCYBI3Z",
+      "temperature": 0.2
     }
   ]
 }

@@ -18,7 +18,7 @@ class GeneratorConfig:
     # 每个 chunk 生成的问题数
     num_questions_per_chunk: int = 2
     # LLM 端点配置 JSON 路径
-    llm_json_path: str = "src/Augmented/llm_endpoints.json"
+    llm_json_path: str = "src/augmented/llm_endpoints.json"
     # 当生成失败或无返回模型信息时的兜底名
     default_model_name: str = "unknown"
     # 单个 chunk 的最大重试次数
@@ -39,7 +39,7 @@ def build_default_config() -> GeneratorConfig:
         chunks_limit=int(os.getenv("EVAL_CHUNKS_LIMIT", "10")),
         min_chunk_length=int(os.getenv("EVAL_MIN_CHUNK_LENGTH", "50")),
         num_questions_per_chunk=int(os.getenv("EVAL_NUM_QUESTIONS", "2")),
-        llm_json_path=os.getenv("EVAL_LLM_JSON_PATH", "src/Augmented/llm_endpoints.json"),
+        llm_json_path=os.getenv("EVAL_LLM_JSON_PATH", "src/augmented/llm_endpoints.json"),
         default_model_name=settings.llm.model_name,
         enabled_strategies=os.getenv("EVAL_ENABLED_STRATEGIES", "adversarial,mixed_pair"),
         strategy_params_json=os.getenv("EVAL_STRATEGY_PARAMS_JSON", "{}"),

@@ -49,50 +49,97 @@ class RetrieverComposer:
     """
     def __init__(self, config: Optional[ComposerConfig | Dict[str, Any]] = None):
         self.config = ComposerConfig.from_any(config)
-        self.retrievers: List[BaseRetrievalStrategy] = []
-        self.rrf_engine = RRFFusionEngine(k=self.config.rrf_k)
+        self.retriever_map: Dict[str, BaseRetrievalStrategy] = {}
         self.milvus_client = get_milvus_client(self.config.milvus_config)
         self.es_client = get_es_client(self.config.es_config)
         
         self._load_plugins()
 
     def _load_plugins(self):
-        """根据配置动态加载插件"""
-        # 1. 主路：永远加载
-        self.retrievers.append(VectorTextRetriever(milvus_client=self.milvus_client))
+        """加载可用插件池，实际启停由 search 的 runtime_config 决定。"""
+        self.retriever_map["vector_text"] = VectorTextRetriever(milvus_client=self.milvus_client)
         logger.info("✅ [Composer] 已加载主路：VectorText")
-        
-        # 2. 变体路：如果开启混合检索
-        if self.config.enable_hybrid_search:
-            # 2. 改写路：如果开启改写
-            if self.config.plugin_rewritten_query:
-                self.retrievers.append(VectorRewrittenRetriever('standard', milvus_client=self.milvus_client))
-                logger.info("✅ [Composer] 已加载变体路：VectorRewritten-standard")
-            
-            if self.config.plugin_rewritten_hyde:
-                self.retrievers.append(VectorRewrittenRetriever('hyde', milvus_client=self.milvus_client))
-                logger.info("✅ [Composer] 已加载变体路：VectorRewritten-hyde")
 
-            # 3. ES 路：如果配置了 ES
-            if self.config.es_host:
-                # 3. ES - Questions 路
-                if self.config.plugin_es_questions:
-                    es_retriever = ESQuestionsRetriever(es_client=self.es_client)
-                    if es_retriever.es.is_available(): # 只有连接成功才加入
-                        self.retrievers.append(es_retriever)
-                        logger.info("✅ [Composer] 已加载 ES - Questions 路：ESQuestions")
-                # 4. ES - Summaries 路
-                if self.config.plugin_es_summaries:
-                    es_retriever = ESSummariesRetriever(es_client=self.es_client)
-                    if es_retriever.es.is_available(): # 只有连接成功才加入
-                        self.retrievers.append(es_retriever)
-                        logger.info("✅ [Composer] 已加载 ES - Summaries 路：ESSummaries")
+        self.retriever_map["vector_rewritten_query"] = VectorRewrittenRetriever(
+            "standard", milvus_client=self.milvus_client
+        )
+        logger.info("✅ [Composer] 已加载变体路：VectorRewritten-standard")
 
-    async def search(self, query: str, rough_top_k: int, filter_expr: Optional[str] = None, **kwargs) -> List[SearchResult]:
+        self.retriever_map["vector_rewritten_hyde"] = VectorRewrittenRetriever(
+            "hyde", milvus_client=self.milvus_client
+        )
+        logger.info("✅ [Composer] 已加载变体路：VectorRewritten-hyde")
+
+        if self.config.es_host:
+            es_questions = ESQuestionsRetriever(es_client=self.es_client)
+            if es_questions.es.is_available():
+                self.retriever_map["es_questions"] = es_questions
+                logger.info("✅ [Composer] 已加载 ES - Questions 路：ESQuestions")
+
+            es_summaries = ESSummariesRetriever(es_client=self.es_client)
+            if es_summaries.es.is_available():
+                self.retriever_map["es_summaries"] = es_summaries
+                logger.info("✅ [Composer] 已加载 ES - Summaries 路：ESSummaries")
+
+    def _resolve_runtime_config(self, runtime_config: Optional[Dict[str, Any]] = None) -> ComposerConfig:
+        payload: Dict[str, Any] = {
+            "enable_hybrid_search": self.config.enable_hybrid_search,
+            "plugin_rewritten_query": self.config.plugin_rewritten_query,
+            "plugin_rewritten_hyde": self.config.plugin_rewritten_hyde,
+            "plugin_es_questions": self.config.plugin_es_questions,
+            "plugin_es_summaries": self.config.plugin_es_summaries,
+            "rrf_k": self.config.rrf_k,
+            "es_host": self.config.es_host,
+        }
+        if runtime_config:
+            payload.update(runtime_config)
+        return ComposerConfig.from_any(payload)
+
+    def _select_retrievers(self, cfg: ComposerConfig) -> List[BaseRetrievalStrategy]:
+        selected: List[BaseRetrievalStrategy] = []
+        vector_text = self.retriever_map.get("vector_text")
+        if vector_text:
+            selected.append(vector_text)
+
+        if not cfg.enable_hybrid_search:
+            return selected
+
+        if cfg.plugin_rewritten_query:
+            retriever = self.retriever_map.get("vector_rewritten_query")
+            if retriever:
+                selected.append(retriever)
+        if cfg.plugin_rewritten_hyde:
+            retriever = self.retriever_map.get("vector_rewritten_hyde")
+            if retriever:
+                selected.append(retriever)
+        if cfg.plugin_es_questions:
+            retriever = self.retriever_map.get("es_questions")
+            if retriever:
+                selected.append(retriever)
+        if cfg.plugin_es_summaries:
+            retriever = self.retriever_map.get("es_summaries")
+            if retriever:
+                selected.append(retriever)
+
+        return selected
+
+    async def search(
+        self,
+        query: str,
+        rough_top_k: int,
+        filter_expr: Optional[str] = None,
+        runtime_config: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> List[SearchResult]:
         """
         异步并行执行多路检索
         """
-        logger.info(f"🚀 [Composer] 开始异步多路检索 ({len(self.retrievers)} 路)...")
+        effective_cfg = self._resolve_runtime_config(runtime_config)
+        selected_retrievers = self._select_retrievers(effective_cfg)
+        logger.info(f"🚀 [Composer] 开始异步多路检索 ({len(selected_retrievers)} 路)...")
+        if not selected_retrievers:
+            logger.warning("⚠️ [Composer] 当前配置下无可用检索路")
+            return []
         
         # 定义一个内部异步包装器，用于在线程池中运行同步的 retriever.search
         async def run_retriever(retriever: BaseRetrievalStrategy) -> List[SearchResult]:
@@ -114,7 +161,7 @@ class RetrieverComposer:
                 return []
 
         # 1. 创建所有检索任务
-        tasks = [run_retriever(r) for r in self.retrievers]
+        tasks = [run_retriever(r) for r in selected_retrievers]
         
         # 2. 并行执行 (gather)
         # return_exceptions=True 确保某个插件崩溃不会导致整个 gather 失败
@@ -138,7 +185,8 @@ class RetrieverComposer:
         
         # 5. 多路结果，执行 RRF 融合
         logger.info(f"🔄 [Composer] 执行 RRF 融合 ({len(valid_results_lists)} 路输入)")
-        fused_results = self.rrf_engine.fuse(valid_results_lists, rough_top_k)
+        rrf_engine = RRFFusionEngine(k=effective_cfg.rrf_k)
+        fused_results = rrf_engine.fuse(valid_results_lists, rough_top_k)
         return fused_results
 
 # 单例

@@ -2,10 +2,10 @@
 # src/augmented/analyst.py
 from __future__ import annotations
 
-import asyncio
 import ast
 import logging
 import re
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -16,6 +16,7 @@ from sqlalchemy import desc
 
 from src.augmented.config import GeneratorConfig, build_default_config
 from src.augmented.llm_router import LLMRouter
+from src.augmented.utils import run_async
 from src.core.models import RagEvalDiagnosis, RagEvalResult
 from src.core.postgres_client import get_postgres_client
 from src.schema.augmented_schema import EvalResultSample
@@ -58,19 +59,6 @@ class RAGAnalyst:
 直接输出分析结论，不要客套。
 """
         )
-
-    @staticmethod
-    def _run_async(coro):
-        """在同步代码里安全运行协程。"""
-        try:
-            asyncio.get_running_loop()
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(coro)
-            finally:
-                loop.close()
-        except RuntimeError:
-            return asyncio.run(coro)
 
     @staticmethod
     def _to_text_list(value) -> List[str]:
@@ -232,7 +220,7 @@ class RAGAnalyst:
 
     def analyze_bad_cases_sync(self, df_results: pd.DataFrame, top_k: int = 5) -> List[Dict]:
         """同步入口，便于在脚本中直接调用。"""
-        return self._run_async(self.analyze_bad_cases(df_results=df_results, top_k=top_k))
+        return run_async(self.analyze_bad_cases(df_results=df_results, top_k=top_k))
 
     @staticmethod
     def _clip_text(text: str, max_len: int = 500) -> str:

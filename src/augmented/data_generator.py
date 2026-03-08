@@ -1,6 +1,7 @@
-# augmented/data_generator.py
 # 主编排器（策略模式）：
 # Milvus 取 chunk -> 按策略构建任务 -> LLM 生成评估样本 -> PostgreSQL 持久化。
+from __future__ import annotations
+
 import ast
 import json
 import logging
@@ -16,26 +17,24 @@ from src.augmented.llm_router import LLMRouter
 from src.augmented.prompts import PromptRegistry
 from src.augmented.sinks import PostgresSink
 from src.augmented.sources import MilvusSource
-from src.augmented.strategies import StrategyTask, build_strategies
+from src.augmented.strategies import BaseGenerationStrategy, StrategyTask, build_strategies
 from src.schema.augmented_schema import GeneratedSample
 
 logger = logging.getLogger(__name__)
 
 
 class DatasetGenerator:
+    """评估集生成器：聚合数据源、策略、LLM 与落库。"""
+
     def __init__(self, config: Optional[GeneratorConfig] = None):
-        # [初始化-1] 读取运行配置（环境变量 + 默认值）
         self.config = config or build_default_config()
-        # [初始化-2] 准备 Prompt 注册器与缓存（不同策略使用不同模板）
         self.prompt_registry = PromptRegistry()
         self.prompt_cache: Dict[str, ChatPromptTemplate] = {}
-        # [初始化-3] 解析策略参数（JSON 字符串 -> dict）
+
         self.strategy_params = self._safe_parse_strategy_params(self.config.strategy_params_json)
-        # [初始化-4] 为 standard 策略补默认题目数（向后兼容旧配置）
         self.strategy_params.setdefault("standard", {})
         self.strategy_params["standard"].setdefault("num_questions", self.config.num_questions_per_chunk)
 
-        # [初始化-5] 准备核心组件：LLM 路由、数据源、存储端、策略集合
         self.router = LLMRouter(config=self.config)
         self.source = MilvusSource()
         self.sink = PostgresSink()
@@ -56,15 +55,15 @@ class DatasetGenerator:
 
     @staticmethod
     def _extract_json_candidate(text: str) -> str:
-        l_arr = text.find("[")
-        r_arr = text.rfind("]")
-        if l_arr != -1 and r_arr != -1 and r_arr > l_arr:
-            return text[l_arr : r_arr + 1]
+        left_arr = text.find("[")
+        right_arr = text.rfind("]")
+        if left_arr != -1 and right_arr != -1 and right_arr > left_arr:
+            return text[left_arr : right_arr + 1]
 
-        l_obj = text.find("{")
-        r_obj = text.rfind("}")
-        if l_obj != -1 and r_obj != -1 and r_obj > l_obj:
-            return text[l_obj : r_obj + 1]
+        left_obj = text.find("{")
+        right_obj = text.rfind("}")
+        if left_obj != -1 and right_obj != -1 and right_obj > left_obj:
+            return text[left_obj : right_obj + 1]
 
         return text
 
@@ -92,54 +91,19 @@ class DatasetGenerator:
             data = [data]
         return data if isinstance(data, list) else []
 
-    def generate_from_task(self, task: StrategyTask) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        # [任务执行-1] 按策略名选择 Prompt 模板
-        last_error_msg = ""
-        prompt = self._get_prompt(task.prompt_profile)
-        # [任务执行-2] 单任务重试循环（网络抖动/模型输出异常时重试）
-        for attempt in range(self.config.max_retries_per_chunk + 1):
+    @staticmethod
+    def _validate_generated_samples(raw_samples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        valid_samples: List[Dict[str, Any]] = []
+        for raw in raw_samples:
             try:
-                # [任务执行-3] 调用 LLM（返回文本 + 实际使用模型名）
-                content, model_used = self.router.invoke(prompt=prompt, payload=task.payload)
-                # [任务执行-4] 解析 JSON（带容错）
-                raw_samples = self._safe_parse_json(content)
-                valid_samples = []
-                validation_failed = 0
-                for raw in raw_samples:
-                    try:
-                        # [任务执行-5] 字段清洗与结构校验（Pydantic）
-                        if isinstance(raw.get("ground_truth_contexts"), str):
-                            raw["ground_truth_contexts"] = [raw["ground_truth_contexts"]]
-                        valid_samples.append(GeneratedSample(**raw).model_dump())
-                    except ValidationError:
-                        validation_failed += 1
-                        continue
-                if valid_samples:
-                    return valid_samples, model_used
-                last_error_msg = (
-                    f"JSON解析成功但无有效样本(raw={len(raw_samples)}, validation_failed={validation_failed})"
-                )
-            except Exception as e:
-                last_error_msg = str(e)
-                logger.error(
-                    "任务生成失败 (attempt=%s): %s | strategy=%s | content_preview=%s",
-                    attempt + 1,
-                    e,
-                    task.strategy_name,
-                    content[:200] if "content" in locals() else "",
-                )
-            time.sleep(0.2)
+                if isinstance(raw.get("ground_truth_contexts"), str):
+                    raw["ground_truth_contexts"] = [raw["ground_truth_contexts"]]
+                valid_samples.append(GeneratedSample(**raw).model_dump())
+            except ValidationError:
+                continue
+        return valid_samples
 
-        logger.warning(
-            "任务生成失败，已放弃。strategy=%s reason=%s | task_preview=%s",
-            task.strategy_name,
-            last_error_msg,
-            str(task.payload)[:160],
-        )
-        return [], None
-
-    def generate(self) -> List[Dict[str, Any]]:
-        # [主流程-1] 从 Milvus 拉取候选 chunk
+    def _load_and_filter_chunks(self) -> List[Dict[str, Any]]:
         chunks = self.source.load_chunks(limit=self.config.chunks_limit)
         logger.info(
             "开始生成评估集: chunks_limit=%s, min_chunk_length=%s, standard_num_questions=%s",
@@ -154,28 +118,65 @@ class DatasetGenerator:
             logger.warning("⚠️ 未加载到任何 chunk，请检查 source 配置。")
             return []
 
-        # [主流程-2] 预过滤过短 chunk，避免低质量样本
-        filtered_chunks: List[Dict[str, Any]] = []
+        filtered: List[Dict[str, Any]] = []
         filtered_short = 0
         for item in chunks:
             text = item.get("text", "")
             if len(text.strip()) < self.config.min_chunk_length:
                 filtered_short += 1
                 continue
-            filtered_chunks.append(item)
-        logger.info("过滤过短chunk=%s, 可用chunk=%s", filtered_short, len(filtered_chunks))
+            filtered.append(item)
+        logger.info("过滤过短chunk=%s, 可用chunk=%s", filtered_short, len(filtered))
+        return filtered
 
-        # [主流程-3] 各策略构建任务（standard / adversarial / mixed_pair）
+    def _build_strategy_tasks(
+        self, chunks: List[Dict[str, Any]]
+    ) -> Tuple[List[Tuple[StrategyTask, str]], Dict[str, BaseGenerationStrategy]]:
         strategy_tasks: List[Tuple[StrategyTask, str]] = []
-        strategy_map = {}
+        strategy_map: Dict[str, BaseGenerationStrategy] = {}
         for strategy in self.strategies:
             strategy_map[strategy.name] = strategy
-            tasks = strategy.build_tasks(filtered_chunks)
-            for t in tasks:
-                strategy_tasks.append((t, strategy.name))
+            tasks = strategy.build_tasks(chunks)
+            for task in tasks:
+                strategy_tasks.append((task, strategy.name))
         logger.info("策略任务总数=%s", len(strategy_tasks))
+        return strategy_tasks, strategy_map
 
-        # [主流程-4] 逐任务执行 LLM + 策略后处理（如对抗题答案强制注入）
+    def generate_from_task(self, task: StrategyTask) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        prompt = self._get_prompt(task.prompt_profile)
+        last_error_msg = ""
+        for attempt in range(self.config.max_retries_per_chunk + 1):
+            try:
+                content, model_used = self.router.invoke(prompt=prompt, payload=task.payload)
+                raw_samples = self._safe_parse_json(content)
+                valid_samples = self._validate_generated_samples(raw_samples)
+                if valid_samples:
+                    return valid_samples, model_used
+                last_error_msg = f"JSON解析成功但无有效样本(raw={len(raw_samples)})"
+            except Exception as exc:
+                last_error_msg = str(exc)
+                logger.error(
+                    "任务生成失败 (attempt=%s): %s | strategy=%s | content_preview=%s",
+                    attempt + 1,
+                    exc,
+                    task.strategy_name,
+                    content[:200] if "content" in locals() else "",
+                )
+            time.sleep(0.2)
+
+        logger.warning(
+            "任务生成失败，已放弃。strategy=%s reason=%s | task_preview=%s",
+            task.strategy_name,
+            last_error_msg,
+            str(task.payload)[:160],
+        )
+        return [], None
+
+    def _execute_strategy_tasks(
+        self,
+        strategy_tasks: List[Tuple[StrategyTask, str]],
+        strategy_map: Dict[str, BaseGenerationStrategy],
+    ) -> List[Tuple[StrategyTask, str, List[Dict[str, Any]], Optional[str]]]:
         raw_results: List[Tuple[StrategyTask, str, List[Dict[str, Any]], Optional[str]]] = []
         for task, strategy_name in strategy_tasks:
             samples, model_used = self.generate_from_task(task)
@@ -191,8 +192,11 @@ class DatasetGenerator:
             failed_tasks,
             total_generated,
         )
+        return raw_results
 
-        # [主流程-5] 统一组装落库数据（补 model_name、strategy、source 索引等追踪字段）
+    def _assemble_rows(
+        self, raw_results: List[Tuple[StrategyTask, str, List[Dict[str, Any]], Optional[str]]]
+    ) -> List[Dict[str, Any]]:
         all_samples: List[Dict[str, Any]] = []
         now_ts = int(time.time())
         today = date.today().isoformat()
@@ -227,12 +231,20 @@ class DatasetGenerator:
                         "source_chunk_index": first_idx,
                         "source_backend": "milvus",
                         "created_at": now_ts,
-                        # 记录该题目属于哪个评测批次，后续可按批次回放评估。
                         "batch_id": int(self.config.sample_batch_id),
                     }
                 )
+        return all_samples
 
-        # [主流程-6] 批量写入 PostgreSQL
+    def generate(self) -> List[Dict[str, Any]]:
+        filtered_chunks = self._load_and_filter_chunks()
+        if not filtered_chunks:
+            return []
+
+        strategy_tasks, strategy_map = self._build_strategy_tasks(filtered_chunks)
+        raw_results = self._execute_strategy_tasks(strategy_tasks, strategy_map)
+        all_samples = self._assemble_rows(raw_results)
+
         self.sink.save(all_samples)
         logger.info("✅ 数据集生成完成，样本数=%s，已写入 PostgreSQL", len(all_samples))
         return all_samples
@@ -241,7 +253,5 @@ class DatasetGenerator:
 if __name__ == "__main__":
     # python -m src.augmented.data_generator
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-
     generator = DatasetGenerator()
     generator.generate()
-

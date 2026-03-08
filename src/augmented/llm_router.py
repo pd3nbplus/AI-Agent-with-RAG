@@ -30,30 +30,43 @@ class LLMRouter:
         # 实例级降级游标：第 k 个失败后，下次从 k+1 开始。
         self._degrade_start_idx = 0
 
-    def _load_endpoints(self, json_path: str, llm_group: Optional[str] = None) -> List[LLMEndpoint]:
-        # 支持形态：
-        # 1) {"generator_llms": [...], "analyst_llms": [...], "llms": [...]} 
-        # 2) {"llms": [...]} 
+    @staticmethod
+    def _pick_records(payload: Any, llm_group: Optional[str]) -> Any:
+        # 支持三种形态：
+        # 1) {"generator_llms": [...], "analyst_llms": [...], "llms": [...]}
+        # 2) {"llms": [...]}
         # 3) [...]
-        # Use utf-8-sig to be compatible with JSON files saved with BOM.
+        if isinstance(payload, list):
+            return payload
+        if not isinstance(payload, dict):
+            return None
+        if llm_group and isinstance(payload.get(llm_group), list):
+            return payload.get(llm_group)
+        if isinstance(payload.get("generator_llms"), list):
+            return payload.get("generator_llms")
+        if isinstance(payload.get("llms"), list):
+            return payload.get("llms")
+        return None
+
+    @staticmethod
+    def _validate_record(item: Dict[str, Any], idx: int, json_path: str):
+        missing = [k for k in ("url", "model") if not item.get(k)]
+        if missing:
+            raise ValueError(f"LLM 配置缺失字段 {missing} at index={idx}, file={json_path}")
+
+    def _load_endpoints(self, json_path: str, llm_group: Optional[str] = None) -> List[LLMEndpoint]:
         with open(json_path, "r", encoding="utf-8-sig") as f:
             payload = json.load(f)
 
-        if isinstance(payload, dict):
-            if llm_group and isinstance(payload.get(llm_group), list):
-                records = payload[llm_group]
-            elif isinstance(payload.get("generator_llms"), list):
-                records = payload["generator_llms"]
-            else:
-                records = payload.get("llms", payload)
-        else:
-            records = payload
-
+        records = self._pick_records(payload, llm_group)
         if not isinstance(records, list) or not records:
             raise ValueError(f"LLM JSON 配置无效或为空: {json_path}, group={llm_group}")
 
         endpoints: List[LLMEndpoint] = []
-        for item in records:
+        for idx, item in enumerate(records):
+            if not isinstance(item, dict):
+                raise ValueError(f"LLM 配置项必须是对象: index={idx}, file={json_path}")
+            self._validate_record(item, idx, json_path)
             endpoints.append(
                 LLMEndpoint(
                     url=item["url"],

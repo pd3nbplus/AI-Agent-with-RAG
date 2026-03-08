@@ -1,13 +1,12 @@
 """
-RAG evaluator (sync).
-- Read generated eval samples from PostgreSQL.
-- Reuse existing retrieval pipeline to produce answer + contexts.
-- Run RAGAS metrics and return a pandas DataFrame.
+RAG evaluator (sync):
+1) 从 PostgreSQL 读取评测样本
+2) 通过 RetrievalPipeline 执行检索并生成回答
+3) 调用 RAGAS 指标评估并返回 DataFrame
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
@@ -20,8 +19,10 @@ from langchain_openai import ChatOpenAI
 from openai import OpenAI
 from ragas import evaluate
 from ragas.llms import llm_factory
-from ragas.metrics import Faithfulness, AnswerRelevancy, ContextPrecision, ContextRecall
+from ragas.metrics import AnswerRelevancy, ContextPrecision, ContextRecall, Faithfulness
+from sqlalchemy import func
 
+from src.augmented.utils import deep_merge, run_async
 from src.core.config import settings
 from src.core.embedding_client import get_ragas_shared_embedding
 from src.core.models import RagEvalResult, RagEvalSample
@@ -29,30 +30,24 @@ from src.core.postgres_client import get_postgres_client
 from src.rag.pipeline import RetrievalPipeline
 from src.schema.augmented_schema import EvalInputSample, EvalResultSample
 from src.utils.xml_parser import remove_think_and_n
-from sqlalchemy import func
 
 logger = logging.getLogger(__name__)
 
 
 class RAGEvaluator:
-    """Evaluator aligned with current architecture."""
+    """评测器：以可配置 pipeline 运行检索评估。"""
 
-    def __init__(self, top_k: int = 3, composer_config: Optional[Dict[str, Any]] = None):
-        self.top_k = top_k
+    def __init__(
+        self,
+        pipeline_config: Optional[Dict[str, Any]] = None,
+    ):
         self.pg_client = get_postgres_client()
+        self.pipeline = RetrievalPipeline()
+        self.pipeline_config = self._build_pipeline_config(pipeline_config=pipeline_config)
 
-        # Independent retrieval pipeline for evaluation experiments.
-        self.pipeline = RetrievalPipeline(composer_config=composer_config)
-
-        # 关键节点1：初始化两套 LLM
-        # - answer_llm: 生成最终回答（RAG 回答阶段）
-        # - ragas_llm: 供 RAGAS 指标打分使用（评估阶段）
         self.answer_llm = self._build_llm_from_global_config()
         self.ragas_llm = self._build_ragas_llm()
-        # 关键节点2：复用全局 embedding 单例，避免重复加载模型。
-        self.ragas_embeddings = get_ragas_shared_embedding(
-            self.pipeline.composer.milvus_client.model_name
-        )
+        self.ragas_embeddings = get_ragas_shared_embedding(settings.embedding.model_name)
 
         self.answer_prompt = ChatPromptTemplate.from_template(
             """
@@ -66,17 +61,21 @@ class RAGEvaluator:
         )
 
     @staticmethod
-    def _run_async(coro):
-        """Run async pipeline in sync context."""
-        try:
-            asyncio.get_running_loop()
-            new_loop = asyncio.new_event_loop()
-            try:
-                return new_loop.run_until_complete(coro)
-            finally:
-                new_loop.close()
-        except RuntimeError:
-            return asyncio.run(coro)
+    def _build_pipeline_config(
+        pipeline_config: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        base_config: Dict[str, Any] = {
+            "retrieval": {"top_k": 3, "rough_top_k": 8},
+            "online": {
+                "enable_rerank": settings.rag_online.enable_rerank,
+                "dynamic_threshold": settings.rag_online.score_threshold,
+            },
+            "filter": {},
+            "composer": {},
+        }
+        if pipeline_config:
+            base_config = deep_merge(base_config, pipeline_config)
+        return base_config
 
     def _build_llm_from_global_config(self) -> ChatOpenAI:
         logger.info("Evaluator uses global LLM: %s", settings.llm.model_name)
@@ -87,11 +86,8 @@ class RAGEvaluator:
             temperature=float(settings.llm.temperature),
         )
 
-    def _build_ragas_llm(self):
-        """
-        Ragas collections metrics require InstructorLLM.
-        Build it from the same global model endpoint.
-        """
+    @staticmethod
+    def _build_ragas_llm():
         client = OpenAI(
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
@@ -102,26 +98,24 @@ class RAGEvaluator:
             client=client,
         )
 
-
     def load_samples_from_postgres(
         self, limit: int = 100, batch_ids: Optional[List[int]] = None
     ) -> List[EvalInputSample]:
-        """按批次加载评测样本；batch_ids 为空时回退为全量随机抽样。"""
         with self.pg_client.get_session() as session:
-            q = session.query(RagEvalSample)
+            query = session.query(RagEvalSample)
             if batch_ids:
-                q = q.filter(RagEvalSample.batch_id.in_(batch_ids))
-            rows: List[RagEvalSample] = q.order_by(func.random()).limit(limit).all()
+                query = query.filter(RagEvalSample.batch_id.in_(batch_ids))
+            rows: List[RagEvalSample] = query.order_by(func.random()).limit(limit).all()
 
         samples: List[EvalInputSample] = []
-        for r in rows:
+        for row in rows:
             samples.append(
                 EvalInputSample(
-                    sample_id=r.id,
-                    sample_batch_id=int(r.batch_id or 1),
-                    question=r.question,
-                    ground_truth=r.ground_truth,
-                    ground_truth_contexts=r.ground_truth_contexts or [],
+                    sample_id=row.id,
+                    sample_batch_id=int(row.batch_id or 1),
+                    question=row.question,
+                    ground_truth=row.ground_truth,
+                    ground_truth_contexts=row.ground_truth_contexts or [],
                 )
             )
         logger.info(
@@ -131,69 +125,58 @@ class RAGEvaluator:
         )
         return samples
 
-    def run_pipeline_for_question(self, question: str) -> Dict[str, Any]:
-        """Retrieve contexts then generate answer."""
-        results = self._run_async(self.pipeline.run(query=question, top_k=self.top_k))
-        contexts = [r.text for r in results] if results else []
+    def _retrieve_contexts(self, question: str) -> List[str]:
+        results = run_async(self.pipeline.run(query=question, config=self.pipeline_config))
+        return [item.text for item in results] if results else []
 
+    def _answer_question(self, question: str, contexts: List[str]) -> str:
         chain = self.answer_prompt | self.answer_llm
-        resp = chain.invoke({"question": question, "contexts": "\n\n".join(contexts)})
-        # 清理部分模型返回的 <think> 推理片段，避免污染评估与报告展示。
-        answer = remove_think_and_n(getattr(resp, "content", "") or "")
+        response = chain.invoke({"question": question, "contexts": "\n\n".join(contexts)})
+        return remove_think_and_n(getattr(response, "content", "") or "")
 
+    def run_pipeline_for_question(self, question: str) -> Dict[str, Any]:
+        contexts = self._retrieve_contexts(question)
+        answer = self._answer_question(question, contexts)
         return {"contexts": contexts, "answer": answer}
 
+    @staticmethod
+    def _to_ragas_row(sample: EvalInputSample, answer: str, contexts: List[str]) -> Dict[str, Any]:
+        return {
+            "sample_id": sample.sample_id,
+            "sample_batch_id": sample.sample_batch_id,
+            "user_input": sample.question,
+            "response": answer,
+            "retrieved_contexts": contexts,
+            "reference": sample.ground_truth,
+            "reference_contexts": sample.ground_truth_contexts,
+            "question": sample.question,
+            "answer": answer,
+            "contexts": contexts,
+            "ground_truth": sample.ground_truth,
+            "ground_truth_contexts": sample.ground_truth_contexts,
+        }
+
     def evaluate_dataset(self, test_samples: List[EvalInputSample]) -> pd.DataFrame:
-        """Run pipeline and compute RAGAS metrics."""
         if not test_samples:
             return pd.DataFrame()
 
         logger.info("Start evaluation, sample count=%s", len(test_samples))
         rows_for_ragas: List[Dict[str, Any]] = []
+        for sample in test_samples:
+            output = self.run_pipeline_for_question(sample.question)
+            rows_for_ragas.append(self._to_ragas_row(sample, output["answer"], output["contexts"]))
 
-        # 关键节点3：逐条样本执行“检索+回答”，并转换到 ragas 所需字段。
-        for s in test_samples:
-            out = self.run_pipeline_for_question(s.question)
-            rows_for_ragas.append(
-                {
-                    # 样本追踪字段：用于写回评估结果表与诊断表。
-                    "sample_id": s.sample_id,
-                    "sample_batch_id": s.sample_batch_id,
-                    # New ragas schema keys.
-                    "user_input": s.question,
-                    "response": out["answer"],
-                    "retrieved_contexts": out["contexts"],
-                    "reference": s.ground_truth,
-                    "reference_contexts": s.ground_truth_contexts,
-                    # Keep compatibility aliases for older tooling/exports.
-                    "question": s.question,
-                    "answer": out["answer"],
-                    "contexts": out["contexts"],
-                    "ground_truth": s.ground_truth,
-                    "ground_truth_contexts": s.ground_truth_contexts,
-                }
-            )
-
-        hf_dataset = HFDataset.from_list(rows_for_ragas)
-
-        # 关键节点4：实例化评估指标对象（不是函数），并注入 llm/embedding 依赖。
+        ragas_dataset = HFDataset.from_list(rows_for_ragas)
         metrics = [
             Faithfulness(llm=self.ragas_llm),
             AnswerRelevancy(llm=self.ragas_llm, embeddings=self.ragas_embeddings),
             ContextPrecision(llm=self.ragas_llm),
             ContextRecall(llm=self.ragas_llm),
         ]
-
-        # 关键节点5：执行 ragas evaluate，返回结构化 DataFrame 结果。
-        result = evaluate(
-            dataset=hf_dataset,
-            metrics=metrics,
-            show_progress=True,
-        )
+        result = evaluate(dataset=ragas_dataset, metrics=metrics, show_progress=True)
         return result.to_pandas()
 
     def save_eval_results(self, df_results: pd.DataFrame, eval_run_id: str) -> int:
-        """将本次评估明细写入 rag_eval_results。"""
         if df_results is None or df_results.empty:
             return 0
 
@@ -228,7 +211,6 @@ class RAGEvaluator:
     def evaluate_from_postgres(
         self, limit: int = 100, batch_ids: Optional[List[int]] = None
     ) -> tuple[pd.DataFrame, str]:
-        """按批次执行评估并返回结果及 eval_run_id。"""
         samples = self.load_samples_from_postgres(limit=limit, batch_ids=batch_ids)
         eval_run_id = f"eval_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
         return self.evaluate_dataset(samples), eval_run_id
@@ -236,9 +218,6 @@ class RAGEvaluator:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    evaluator = RAGEvaluator(top_k=3)
+    evaluator = RAGEvaluator(pipeline_config={"retrieval": {"top_k": 3}})
     df, _ = evaluator.evaluate_from_postgres(limit=10)
     print(df.head())
-
-
-
